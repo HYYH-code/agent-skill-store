@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Agent Skill Store mark</title>
+  <path fill="#20262E" d="M24 24h88v64H80v40H24V24Z"/>
+  <path fill="#087F5B" d="M144 24h88v104h-56V88h-32V24Z"/>
+  <path fill="#E54B5D" d="M24 144h48l40 32v32l16 16H24v-80Z"/>
+  <path fill="#20262E" d="M232 144h-48l-40 32v32l-16 16h104v-80Z"/>
+</svg>

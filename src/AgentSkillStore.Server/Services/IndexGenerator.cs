@@ -1,0 +1,76 @@
+// -----------------------------------------------------------------------
+// <copyright file="IndexGenerator.cs" company="Petabridge, LLC">
+//      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
+// </copyright>
+// -----------------------------------------------------------------------
+using AgentSkillStore.Server.Data;
+using AgentSkillStore.Server.Models;
+
+namespace AgentSkillStore.Server.Services;
+
+/// <summary>
+/// Generates RFC-compliant skill discovery index.
+/// </summary>
+public sealed class IndexGenerator
+{
+    private readonly SkillRepository _repository;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<IndexGenerator> _logger;
+
+    public IndexGenerator(
+        SkillRepository repository,
+        IConfiguration configuration,
+        ILogger<IndexGenerator> logger)
+    {
+        _repository = repository;
+        _configuration = configuration;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Generates the RFC-compliant index for /.well-known/agent-skills/index.json
+    /// </summary>
+    public async Task<RfcSkillIndex> GenerateRfcIndexAsync(CancellationToken ct = default)
+    {
+        var baseUrl = GetBaseUrl();
+        var latestVersions = await _repository.GetAllLatestVersionsWithMetadataAsync(ct: ct);
+
+        var entries = new List<RfcSkillEntry>(latestVersions.Count);
+
+        foreach (var v in latestVersions)
+        {
+            var files = await _repository.GetFilesAsync(v.Id, ct);
+
+            entries.Add(new RfcSkillEntry
+            {
+                Name = v.SkillName,
+                Type = v.SkillType,
+                Description = v.Description,
+                Url = v.SkillType == SkillTypes.SkillMd
+                    ? $"{baseUrl}/api/v1/skills/{v.SkillName}/{v.Version}/SKILL.md"
+                    : $"{baseUrl}/api/v1/skills/{v.SkillName}/{v.Version}/archive.zip",
+                Digest = Sha256Digest.Create(v.ArtifactSha256).Value,
+                Version = v.Version,
+                Resources = files.Count > 0
+                    ? files.Select(f => new RfcResourceEntry
+                    {
+                        Path = f.RelativePath,
+                        Digest = Sha256Digest.Create(f.Sha256).Value,
+                        Url = $"{baseUrl}/api/v1/skills/{v.SkillName}/{v.Version}/{f.RelativePath}",
+                        UnixMode = f.UnixMode
+                    }).ToList()
+                    : null
+            });
+        }
+
+        _logger.LogDebug("Generated RFC index with {Count} skills", entries.Count);
+
+        return new RfcSkillIndex { Skills = entries };
+    }
+
+    private string GetBaseUrl()
+    {
+        var baseUrl = _configuration["AgentSkillStore:BaseUrl"] ?? "http://localhost:8081";
+        return baseUrl.TrimEnd('/');
+    }
+}

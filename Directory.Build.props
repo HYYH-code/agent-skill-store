@@ -1,0 +1,66 @@
+<Project>
+  <!-- Metadata -->
+  <PropertyGroup>
+    <Copyright>Copyright © 2026 Agent Skill Store contributors. Portions copyright Petabridge, LLC.</Copyright>
+    <Authors>Agent Skill Store contributors</Authors>
+    <Product>Agent Skill Store</Product>
+    <RepositoryUrl Condition="'$(RepositoryUrl)' == '' and '$(GITHUB_SERVER_URL)' != '' and '$(GITHUB_REPOSITORY)' != ''">$(GITHUB_SERVER_URL)/$(GITHUB_REPOSITORY)</RepositoryUrl>
+    <PackageProjectUrl Condition="'$(RepositoryUrl)' != ''">$(RepositoryUrl)</PackageProjectUrl>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageTags>agent-skills;ai;skills;registry;agent-skill-store</PackageTags>
+  </PropertyGroup>
+  <!-- C# Language Settings -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+  </PropertyGroup>
+  <!-- Version Management -->
+  <PropertyGroup>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionSuffix>
+    </VersionSuffix>
+    <PackageReleaseNotes>Initial Agent Skill Store open-source release with governed publication, versioned discovery, Agent Key authentication, and the skillstore CLI.</PackageReleaseNotes>
+  </PropertyGroup>
+  <!-- Default: non-packable unless explicitly set -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <!-- Target Framework Definitions -->
+  <PropertyGroup>
+    <NetLibVersion>net10.0</NetLibVersion>
+    <NetTestVersion>net10.0</NetTestVersion>
+  </PropertyGroup>
+  <!-- SourceLink Configuration -->
+  <PropertyGroup>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(RepositoryUrl)' == ''">
+    <PublishRepositoryUrl>false</PublishRepositoryUrl>
+    <EmbedUntrackedSources>false</EmbedUntrackedSources>
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+  <!-- NuGet Package Assets -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+    <None Include="$(MSBuildThisFileDirectory)agent-skill-store-icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+  <PropertyGroup>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>agent-skill-store-icon.png</PackageIcon>
+  </PropertyGroup>
+</Project>

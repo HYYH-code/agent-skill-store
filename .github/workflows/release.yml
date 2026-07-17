@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  nuget:
+    name: NuGet Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Pack
+        run: |
+          dotnet pack src/AgentSkillStore.Client/AgentSkillStore.Client.csproj -c Release -p:PackageVersion="$VERSION" -o artifacts
+          dotnet pack src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj -c Release -p:PackageVersion="$VERSION" -o artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-nuget
+          path: artifacts/*.*nupkg
+
+  cli:
+    name: CLI ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+            format: tar
+          - rid: linux-arm64
+            os: ubuntu-latest
+            format: tar
+          - rid: osx-arm64
+            os: macos-latest
+            format: tar
+          - rid: win-x64
+            os: windows-latest
+            format: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Set version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Publish
+        shell: bash
+        run: >-
+          dotnet publish src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj
+          -c Release -r ${{ matrix.rid }} --self-contained true
+          -p:PublishSingleFile=true -p:Version="$VERSION"
+          -o publish
+      - name: Smoke test
+        if: matrix.rid == 'linux-x64' || matrix.rid == 'win-x64' || (matrix.rid == 'osx-arm64' && runner.arch == 'ARM64')
+        shell: bash
+        run: |
+          binary=publish/skillstore
+          [[ '${{ matrix.rid }}' == win-* ]] && binary=publish/skillstore.exe
+          "$binary" --version
+          "$binary" --help
+      - name: Package tar.gz
+        if: matrix.format == 'tar'
+        shell: bash
+        run: tar -C publish -czf "agent-skill-store-$VERSION-${{ matrix.rid }}.tar.gz" .
+      - name: Package zip
+        if: matrix.format == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path publish/* -DestinationPath "agent-skill-store-$env:VERSION-${{ matrix.rid }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-cli-${{ matrix.rid }}
+          path: agent-skill-store-*
+
+  oci:
+    name: OCI Archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build multi-platform OCI archive
+        run: >-
+          docker buildx build
+          --platform linux/amd64,linux/arm64
+          --file docker/Dockerfile
+          --output type=oci,dest=agent-skill-store-$VERSION.oci.tar
+          .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-oci
+          path: agent-skill-store-*.oci.tar
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [nuget, cli, oci]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      - name: Scan release packages
+        shell: bash
+        run: |
+          mkdir -p scan
+          for archive in release/*.tar.gz; do mkdir -p "scan/$(basename "$archive")"; tar -xzf "$archive" -C "scan/$(basename "$archive")"; done
+          for archive in release/*.zip release/*.nupkg release/*.snupkg; do
+            [ -e "$archive" ] || continue
+            target="scan/$(basename "$archive")"
+            mkdir -p "$target"
+            unzip -q "$archive" -d "$target"
+          done
+          mkdir -p scan/oci
+          tar -xf release/*.oci.tar -C scan/oci
+          mkdir -p scan/oci-layers
+          for blob in scan/oci/blobs/sha256/*; do
+            if tar -tzf "$blob" >/dev/null 2>&1; then
+              layer="scan/oci-layers/$(basename "$blob")"
+              mkdir -p "$layer"
+              tar -xzf "$blob" -C "$layer"
+            fi
+          done
+          legacy_pattern='Zhi''qing|智''擎|技术''中心|Net''claw|zq''skill|skill''server'
+          if rg -n -i -a "$legacy_pattern" scan; then
+            echo "Removed brand content found in release packages." >&2
+            exit 1
+          fi
+          key_pattern='s''k-[A-Za-z0-9_-]{40,}'
+          if rg -n -a "$key_pattern" scan; then
+            echo "Possible API Key found in release packages." >&2
+            exit 1
+          fi
+          path_pattern='C:\\''Users\\|/Users/[^/]+/(Documents|Desktop|Downloads|Library|AppData)/|/home/[^/]+/(Documents|Desktop|Downloads|projects|workspace)/'
+          if rg -n -i -a "$path_pattern" scan; then
+            echo "Personal filesystem path found in release packages." >&2
+            exit 1
+          fi
+      - name: Create checksums
+        working-directory: release
+        run: sha256sum * > SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --title "Agent Skill Store $GITHUB_REF_NAME"
+          --notes-file RELEASE_NOTES.md
+          release/*

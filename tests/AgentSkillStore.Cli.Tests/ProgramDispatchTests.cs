@@ -1,0 +1,217 @@
+// -----------------------------------------------------------------------
+// <copyright file="ProgramDispatchTests.cs" company="Petabridge, LLC">
+//      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
+// </copyright>
+// -----------------------------------------------------------------------
+
+using System.Diagnostics;
+using AgentSkillStore.Cli.Commands;
+using Xunit;
+
+namespace AgentSkillStore.Cli.Tests;
+
+public sealed class ProgramDispatchTests : IDisposable
+{
+    private readonly string _tempDir;
+
+    public ProgramDispatchTests()
+    {
+        _tempDir = Path.Combine(Path.GetTempPath(), $"skill-dispatch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_tempDir);
+    }
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_tempDir))
+            Directory.Delete(_tempDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Lint_DoesNotRequireServerUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillDir = Path.Combine(_tempDir, "example-skill");
+        Directory.CreateDirectory(skillDir);
+        await File.WriteAllTextAsync(Path.Combine(skillDir, "SKILL.md"),
+            "---\nname: example-skill\nversion: 1.0.0\ndescription: A skill.\n---\n\n# Example\n\nBody.",
+            ct);
+
+        var result = await RunCliAsync(["lint", _tempDir], ct);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain("Server URL not configured", result.StdErr);
+        Assert.DoesNotContain("Server URL not configured", result.StdOut);
+    }
+
+    [Fact]
+    public async Task LintSubAgent_DoesNotRequireServerUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var agentPath = Path.Combine(_tempDir, "support-agent.md");
+        await File.WriteAllTextAsync(agentPath, """
+            ---
+            name: support-agent
+            description: Diagnose support issues.
+            ---
+
+            You are a support diagnostician.
+            """, ct);
+
+        var result = await RunCliAsync(["lint", "subagent", agentPath], ct);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain("Server URL not configured", result.StdErr);
+        Assert.DoesNotContain("Server URL not configured", result.StdOut);
+    }
+
+    [Fact]
+    public async Task LintSubAgents_DoesNotRequireServerUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var agentPath = Path.Combine(_tempDir, "support-agent.md");
+        await File.WriteAllTextAsync(agentPath, """
+            ---
+            name: support-agent
+            description: Diagnose support issues.
+            ---
+
+            You are a support diagnostician.
+            """, ct);
+
+        var result = await RunCliAsync(["lint", "subagents", _tempDir], ct);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain("Server URL not configured", result.StdErr);
+        Assert.DoesNotContain("Server URL not configured", result.StdOut);
+    }
+
+    [Fact]
+    public async Task List_RequiresServerUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await RunCliAsync(["list"], ct);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Server URL not configured", result.StdErr);
+    }
+
+    [Fact]
+    public async Task ApiKeyGenerate_DoesNotRequireServerUrlOrAuthentication()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await RunCliAsync(["api-key", "generate"], ct);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Matches("(?m)^sk-[A-Za-z0-9_-]{43}\r?$", result.StdOut);
+        Assert.Contains("AGENTSKILLSTORE__BOOTSTRAPAPIKEY", result.StdOut);
+        Assert.DoesNotContain("Server URL not configured", result.StdErr);
+        Assert.DoesNotContain("Authentication required", result.StdErr);
+    }
+
+    [Fact]
+    public async Task Help_UsesFullBrandName()
+    {
+        var result = await RunCliAsync(["--help"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("Agent Skill Store CLI", result.StdOut);
+        Assert.DoesNotContain("AgentSkillStore Skill CLI", result.StdOut);
+    }
+
+    [Fact]
+    public async Task ListSubAgents_RequiresServerUrl()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var result = await RunCliAsync(["list-subagents"], ct);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Server URL not configured", result.StdErr);
+    }
+
+    [Fact]
+    public async Task ListSubAgents_DoesNotRequireApiKey()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // list-subagents mirrors 'list': a server URL is required, but no API key.
+        // With only a server URL set, the CLI must not short-circuit on missing auth.
+        var result = await RunCliAsync(
+            ["list-subagents", "--server-url", "http://127.0.0.1:59999"], ct);
+
+        Assert.DoesNotContain("Authentication required", result.StdErr);
+        Assert.DoesNotContain("Authentication required", result.StdOut);
+    }
+
+    [Fact]
+    public async Task DeleteSubAgent_RequiresApiKey()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // delete-subagent mirrors 'delete': it is an authenticated write operation.
+        var result = await RunCliAsync(
+            ["delete-subagent", "support-agent", "1.0.0", "--yes", "--server-url", "http://127.0.0.1:59999"],
+            ct);
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("Authentication required", result.StdErr);
+    }
+
+    private static async Task<CliResult> RunCliAsync(string[] args, CancellationToken ct)
+    {
+        var dllPath = typeof(LintCommand).Assembly.Location;
+        var executablePath = Path.ChangeExtension(dllPath, OperatingSystem.IsWindows() ? ".exe" : "");
+        var useAppHost = File.Exists(executablePath);
+        var psi = new ProcessStartInfo(useAppHost ? executablePath : ResolveDotnetHost())
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        if (!useAppHost)
+        {
+            psi.ArgumentList.Add("exec");
+            psi.ArgumentList.Add(dllPath);
+        }
+
+        foreach (var a in args)
+            psi.ArgumentList.Add(a);
+
+        // Isolate from the host environment: a developer or CI runner with these
+        // variables set must not mask the bug this test guards against.
+        psi.Environment.Remove("AGENT_SKILL_STORE_URL");
+        psi.Environment.Remove("AGENT_SKILL_STORE_API_KEY");
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start CLI process");
+
+        var stdOutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        var stdErrTask = proc.StandardError.ReadToEndAsync(ct);
+
+        await proc.WaitForExitAsync(ct).WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+        return new CliResult(proc.ExitCode, await stdOutTask, await stdErrTask);
+    }
+
+    private static string ResolveDotnetHost()
+    {
+        var executableName = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+        var candidates = new[]
+        {
+            Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"),
+            Environment.GetEnvironmentVariable("DOTNET_ROOT") is { Length: > 0 } root
+                ? Path.Combine(root, executableName)
+                : null,
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) is { Length: > 0 } home
+                ? Path.Combine(home, ".dotnet", executableName)
+                : null
+        };
+
+        return candidates.FirstOrDefault(File.Exists) ?? executableName;
+    }
+
+    private sealed record CliResult(int ExitCode, string StdOut, string StdErr);
+}

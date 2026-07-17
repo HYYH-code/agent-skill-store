@@ -1,0 +1,64 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+    <AspireVersion>13.1.2</AspireVersion>
+  </PropertyGroup>
+
+  <!-- ASP.NET Core Dependencies -->
+  <ItemGroup Label="ASP.NET Core">
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.9" />
+    <!-- Pin to patched version to avoid CVE-2026-49451 (stack overflow on circular schema refs). -->
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.9" />
+  </ItemGroup>
+
+  <!-- Data (Dapper for AOT compatibility) -->
+  <ItemGroup Label="Data">
+    <PackageVersion Include="Dapper" Version="2.1.79" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.9" />
+  </ItemGroup>
+
+  <!-- Utilities -->
+  <ItemGroup Label="Utilities">
+    <PackageVersion Include="YamlDotNet" Version="18.1.0" />
+    <PackageVersion Include="SharpZipLib" Version="1.4.2" />
+  </ItemGroup>
+
+  <!-- Aspire -->
+  <ItemGroup Label="Aspire">
+    <PackageVersion Include="Aspire.Hosting.AppHost" Version="$(AspireVersion)" />
+    <PackageVersion Include="Aspire.Hosting.Testing" Version="$(AspireVersion)" />
+  </ItemGroup>
+
+  <!-- Build Dependencies -->
+  <ItemGroup Label="Build Dependencies">
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.203" />
+  </ItemGroup>
+
+  <!-- Test Dependencies (xUnit 3) -->
+  <ItemGroup Label="Test Dependencies">
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.9" />
+    <PackageVersion Include="Microsoft.Playwright" Version="1.52.0" />
+  </ItemGroup>
+  <!-- Transitive security pin: Aspire.Hosting.AppHost → StreamJsonRpc pulls in
+       MessagePack 2.5.192, flagged by NuGetAudit (GHSA-hv8m-jj95-wg3x, LZ4
+       decompression DoS). Pin to the patched v2 (2.5.301) to clear the audit. -->
+  <ItemGroup>
+    <PackageVersion Include="MessagePack" Version="3.1.8" />
+  </ItemGroup>
+  <!-- Transitive audit suppress: Microsoft.Data.Sqlite → SQLitePCLRaw.lib.e_sqlite3 2.1.11
+       is flagged by NuGetAudit (GHSA-2m69-gcr7-jv3q, CVE-2025-6965 — SQLite < 3.50.2
+       memory corruption in aggregate-term handling). No patched version of
+       SQLitePCLRaw.lib.e_sqlite3 is available on NuGet: 3.50.3 was published then unlisted,
+       and 2.1.11 remains the latest stable release. This suppress will be removed once
+       Microsoft ships a Microsoft.Data.Sqlite release that pins a non-vulnerable
+       SQLitePCLRaw.lib.e_sqlite3. Track: https://github.com/dotnet/efcore/issues/38257 -->
+  <ItemGroup>
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+  </ItemGroup>
+</Project>

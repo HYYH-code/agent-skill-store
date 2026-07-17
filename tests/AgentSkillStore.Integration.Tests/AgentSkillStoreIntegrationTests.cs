@@ -1,0 +1,1379 @@
+// -----------------------------------------------------------------------
+// <copyright file="AgentSkillStoreIntegrationTests.cs" company="Petabridge, LLC">
+//      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
+// </copyright>
+// -----------------------------------------------------------------------
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.IO.Compression;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using AgentSkillStore.Client;
+using AgentSkillStore.Server.Services;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Xunit;
+
+namespace AgentSkillStore.Integration.Tests;
+
+[Collection("AgentSkillStore")]
+public sealed class AgentSkillStoreIntegrationTests
+{
+    private readonly AgentSkillStoreFixture _fixture;
+
+    public AgentSkillStoreIntegrationTests(AgentSkillStoreFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    private static string ComputeSha256Digest(byte[] bytes)
+    {
+        var hash = SHA256.HashData(bytes);
+        return $"sha256:{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
+
+    private static MultipartFormDataContent CreateSubAgentUpload(string name, string version, string content)
+    {
+        var form = new MultipartFormDataContent();
+        form.Add(new StringContent(name), "name");
+        form.Add(new StringContent(version), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(content));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        form.Add(fileContent, "file", "agent.md");
+
+        return form;
+    }
+
+    [Fact]
+    public async Task Health_ReturnsOk()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var response = await _fixture.HttpClient.GetAsync("/health", ct);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<AgentSkillStore.Server.Models.HealthResponse>(ct);
+        Assert.NotNull(body);
+        Assert.Equal("healthy", body.Status);
+        Assert.True(body.Timestamp > DateTimeOffset.MinValue);
+    }
+
+    [Fact]
+    public async Task AppInfo_ReturnsAssemblyVersion()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var assembly = typeof(Program).Assembly;
+        var expectedAssemblyVersion = assembly.GetName().Version?.ToString() ?? "unknown";
+        var expectedVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? expectedAssemblyVersion;
+
+        var body = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.AppInfoResponse>(
+            "/api/v1/info", ct);
+
+        Assert.NotNull(body);
+        Assert.Equal(expectedVersion, body.Version);
+        Assert.Equal(expectedAssemblyVersion, body.AssemblyVersion);
+    }
+
+    [Fact]
+    public async Task GetRfcIndex_ReturnsIndex()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var index = await _fixture.Client.GetRfcIndexAsync(ct);
+
+        Assert.NotNull(index);
+    }
+
+    [Fact]
+    public async Task ListSkills_ReturnsList()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skills = await _fixture.Client.ListSkillsAsync(ct: ct);
+
+        Assert.NotNull(skills);
+    }
+
+    [Fact]
+    public async Task UploadAndRetrieveSkill_EndToEnd()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"e2e-test-{Guid.NewGuid():N}"[..20];
+
+        // Upload a skill
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: A test skill for integration testing
+            ---
+
+            # Test Skill
+
+            This is a test skill.
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        // List skills - should contain our skill (no auth required for reads)
+        var skills = await _fixture.Client.ListSkillsAsync(ct: ct);
+        Assert.Contains(skills, s => s.Name == skillName);
+
+        // Get RFC index - should contain our skill
+        var index = await _fixture.Client.GetRfcIndexAsync(ct);
+        Assert.NotNull(index);
+        Assert.Contains(index.Skills, s => s.Name == skillName);
+        var indexSkill = Assert.Single(index.Skills, s => s.Name == skillName);
+        Assert.Equal("skill-md", indexSkill.Type);
+        Assert.EndsWith($"/api/v1/skills/{skillName}/1.0.0/SKILL.md", indexSkill.Url, StringComparison.Ordinal);
+
+        // Get skill versions
+        var versions = await _fixture.Client.GetSkillVersionsAsync(skillName, ct);
+        Assert.Single(versions);
+        Assert.Equal("1.0.0", versions[0].Version);
+
+        // Get specific version
+        var version = await _fixture.Client.GetVersionAsync(skillName, "1.0.0", ct);
+        Assert.NotNull(version);
+        Assert.Equal(skillName, version.Name);
+
+        // Download SKILL.md
+        var downloadedContent = await _fixture.Client.GetSkillFileAsStringAsync(skillName, "1.0.0", ct: ct);
+        Assert.Contains("# Test Skill", downloadedContent);
+
+        // Verify digest
+        var verified = await _fixture.Client.VerifyDigestAsync(skillName, "1.0.0", version.Sha256, ct);
+        Assert.True(verified);
+    }
+
+    [Fact]
+    public async Task NativeManifest_SkillTraversal_ReturnsRfcArtifactValues()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"manifest-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Native manifest traversal test
+            metadata:
+              subagent: technical-support-diagnostician
+            ---
+
+            # Native Manifest Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var root = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeRootManifest>("/manifest.json", ct);
+        Assert.NotNull(root);
+        Assert.Equal("v1", root.ApiVersion);
+        var v1 = root.Versions["v1"];
+        Assert.Equal("/manifest.json", v1.Self.Href);
+        Assert.Equal("/skills/v1/index.json", v1.Skills.Href);
+        Assert.Equal("/subagents/v1/index.json", v1.SubAgents.Href);
+
+        var skillIndex = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSkillCollectionIndex>(
+            v1.Skills.Href, ct);
+        Assert.NotNull(skillIndex);
+        Assert.Equal("skill-index", skillIndex.Kind);
+        var pageLink = Assert.Single(skillIndex.Pages);
+
+        var skillPage = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSkillCollectionPage>(
+            pageLink.Href, ct);
+        Assert.NotNull(skillPage);
+        var item = Assert.Single(skillPage.Items, i => i.Name == skillName);
+        Assert.Equal("1.0.0", item.LatestVersion);
+        Assert.Equal($"/skills/v1/{skillName}/index.json", item.Href);
+
+        var identity = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSkillIdentityIndex>(
+            item.Href, ct);
+        Assert.NotNull(identity);
+        Assert.Equal(skillName, identity.Name);
+        var versionLink = Assert.Single(identity.Versions, v => v.Version == "1.0.0");
+
+        var detail = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSkillVersionDetail>(
+            versionLink.Href, ct);
+        Assert.NotNull(detail);
+        Assert.Equal("skill-version", detail.Kind);
+        Assert.NotNull(detail.RoutesToSubagent);
+        Assert.Equal("technical-support-diagnostician", detail.RoutesToSubagent!.Name);
+        Assert.Equal("/subagents/v1/technical-support-diagnostician/index.json", detail.RoutesToSubagent.Href);
+
+        var rfcIndex = await _fixture.Client.GetRfcIndexAsync(ct);
+        Assert.NotNull(rfcIndex);
+        var rfcSkill = Assert.Single(rfcIndex.Skills, s => s.Name == skillName);
+        Assert.Equal(rfcSkill.Name, detail.Artifact.Name);
+        Assert.Equal(rfcSkill.Version, detail.Artifact.Version);
+        Assert.Equal(rfcSkill.Type, detail.Artifact.Type);
+        Assert.Equal(rfcSkill.Description, detail.Artifact.Description);
+        Assert.Equal(rfcSkill.Url, detail.Artifact.Url);
+        Assert.Equal(rfcSkill.Digest, detail.Artifact.Digest);
+    }
+
+    [Fact]
+    public async Task UploadSkill_WithListValuedMetadata_IsAcceptedAndSiblingScalarsParsed()
+    {
+        // Regression: a metadata value that is a YAML sequence (e.g. `tags`) used to throw during
+        // frontmatter deserialization, which rejected the entire skill. The parser now coerces such
+        // values to strings, so the upload succeeds and sibling scalar metadata (category) still parses.
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"tags-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Skill whose metadata carries a list of tags
+            metadata:
+              category: code-quality
+              tags: [.net, code-review, testing]
+            ---
+
+            # Tagged Skill
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var skills = await _fixture.Client.ListSkillsAsync(ct: ct);
+        var uploaded = Assert.Single(skills, s => s.Name == skillName);
+        Assert.Equal("code-quality", uploaded.Category);
+    }
+
+    [Fact]
+    public async Task UploadAndRetrieveSubAgent_EndToEnd()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var subAgentName = $"agent-{Guid.NewGuid():N}"[..20];
+
+        var agentMd = $"""
+            ---
+            name: {subAgentName}
+            description: Diagnose technical support issues.
+            modelRole: Main
+            timeoutSeconds: 120
+            prefillTimeoutSeconds: 30
+            visibility: internal
+            emitStructuredFindings: true
+            ---
+
+            You are a technical support diagnostician.
+            """;
+
+        using var content = CreateSubAgentUpload(subAgentName, "1.0.0", agentMd);
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var upload = await uploadResponse.Content.ReadFromJsonAsync<AgentSkillStore.Server.Models.SubAgentUploadResponse>(ct);
+        Assert.NotNull(upload);
+        Assert.Equal(subAgentName, upload.Name);
+        Assert.Equal("1.0.0", upload.Version);
+        Assert.StartsWith("sha256:", upload.Sha256);
+        Assert.EndsWith($"/api/v1/subagents/{subAgentName}/1.0.0/agent.md", upload.Url, StringComparison.Ordinal);
+
+        var list = await _fixture.HttpClient.GetFromJsonAsync<IReadOnlyList<AgentSkillStore.Server.Models.SubAgentSummary>>("/api/v1/subagents", ct);
+        Assert.NotNull(list);
+        Assert.Contains(list, s => s.Name == subAgentName && s.LatestVersion == "1.0.0");
+
+        var versions = await _fixture.HttpClient.GetFromJsonAsync<IReadOnlyList<AgentSkillStore.Server.Models.SubAgentVersionSummary>>(
+            $"/api/v1/subagents/{subAgentName}", ct);
+        Assert.NotNull(versions);
+        var version = Assert.Single(versions);
+        Assert.Equal("agent-md", version.Type);
+        Assert.Equal("Main", version.ModelRole);
+        Assert.Equal(120, version.TimeoutSeconds);
+        Assert.Equal(30, version.PrefillTimeoutSeconds);
+        Assert.Equal("internal", version.Visibility);
+        Assert.True(version.EmitStructuredFindings);
+
+        var versionDetail = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.SubAgentVersionSummary>(
+            $"/api/v1/subagents/{subAgentName}/1.0.0", ct);
+        Assert.NotNull(versionDetail);
+        Assert.Equal(upload.Sha256, versionDetail.Sha256);
+
+        var artifactResponse = await _fixture.HttpClient.GetAsync($"/api/v1/subagents/{subAgentName}/1.0.0/agent.md", ct);
+        Assert.Equal(HttpStatusCode.OK, artifactResponse.StatusCode);
+        Assert.Equal("text/markdown", artifactResponse.Content.Headers.ContentType?.MediaType);
+
+        var artifactBytes = await artifactResponse.Content.ReadAsByteArrayAsync(ct);
+        Assert.Equal(upload.Sha256, ComputeSha256Digest(artifactBytes));
+        Assert.Contains("technical support diagnostician", Encoding.UTF8.GetString(artifactBytes));
+
+        var rfcIndex = await _fixture.Client.GetRfcIndexAsync(ct);
+        Assert.NotNull(rfcIndex);
+        Assert.DoesNotContain(rfcIndex.Skills, s => s.Name == subAgentName);
+    }
+
+    [Fact]
+    public async Task NativeManifest_SubAgentTraversal_ReturnsAgentArtifactValues()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var subAgentName = $"manifest-agent-{Guid.NewGuid():N}"[..20];
+
+        var agentMd = $"""
+            ---
+            name: {subAgentName}
+            description: Native manifest sub-agent test.
+            modelRole: Compaction
+            timeoutSeconds: 90
+            visibility: user-facing
+            ---
+
+            You are a manifest-tested sub-agent.
+            """;
+
+        using var content = CreateSubAgentUpload(subAgentName, "1.0.0", agentMd);
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var root = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeRootManifest>("/manifest.json", ct);
+        Assert.NotNull(root);
+        var v1 = root.Versions["v1"];
+        Assert.Equal("/subagents/v1/index.json", v1.SubAgents.Href);
+
+        var subAgentIndex = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSubAgentCollectionIndex>(
+            v1.SubAgents.Href, ct);
+        Assert.NotNull(subAgentIndex);
+        Assert.Equal("subagent-index", subAgentIndex.Kind);
+        var pageLink = Assert.Single(subAgentIndex.Pages);
+
+        var subAgentPage = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSubAgentCollectionPage>(
+            pageLink.Href, ct);
+        Assert.NotNull(subAgentPage);
+        Assert.Equal("subagent-page", subAgentPage.Kind);
+        var item = Assert.Single(subAgentPage.Items, i => i.Name == subAgentName);
+        Assert.Equal("1.0.0", item.LatestVersion);
+        Assert.Equal($"/subagents/v1/{subAgentName}/index.json", item.Href);
+
+        var identity = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSubAgentIdentityIndex>(
+            item.Href, ct);
+        Assert.NotNull(identity);
+        Assert.Equal("subagent", identity.Kind);
+        Assert.Equal(subAgentName, identity.Name);
+        var versionLink = Assert.Single(identity.Versions, v => v.Version == "1.0.0");
+
+        var detail = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSubAgentVersionDetail>(
+            versionLink.Href, ct);
+        Assert.NotNull(detail);
+        Assert.Equal("subagent-version", detail.Kind);
+        Assert.Equal(subAgentName, detail.Name);
+        Assert.Equal("1.0.0", detail.Version);
+        Assert.Equal("agent-md", detail.Type);
+        Assert.Equal("Native manifest sub-agent test.", detail.Description);
+        Assert.EndsWith($"/api/v1/subagents/{subAgentName}/1.0.0/agent.md", detail.Url, StringComparison.Ordinal);
+
+        var artifactResponse = await _fixture.HttpClient.GetAsync($"/api/v1/subagents/{subAgentName}/1.0.0/agent.md", ct);
+        Assert.Equal(HttpStatusCode.OK, artifactResponse.StatusCode);
+        var artifactBytes = await artifactResponse.Content.ReadAsByteArrayAsync(ct);
+        Assert.Equal(detail.Digest, ComputeSha256Digest(artifactBytes));
+        Assert.Equal(detail.Digest, versionLink.Digest);
+
+        var rfcIndex = await _fixture.Client.GetRfcIndexAsync(ct);
+        Assert.NotNull(rfcIndex);
+        Assert.DoesNotContain(rfcIndex.Skills, s => s.Name == subAgentName);
+    }
+
+    [Fact]
+    public async Task UploadSubAgent_DuplicateVersion_ReturnsConflict()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var subAgentName = $"dupe-{Guid.NewGuid():N}"[..20];
+        var agentMd = $"---\nname: {subAgentName}\ndescription: Duplicate test\n---\nPrompt body";
+
+        using var first = CreateSubAgentUpload(subAgentName, "1.0.0", agentMd);
+        var firstResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", first, ct);
+        Assert.Equal(HttpStatusCode.Created, firstResponse.StatusCode);
+
+        using var second = CreateSubAgentUpload(subAgentName, "1.0.0", agentMd);
+        var secondResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", second, ct);
+        Assert.Equal(HttpStatusCode.Conflict, secondResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadSubAgent_InvalidFrontmatter_ReturnsBadRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var cases = new[]
+        {
+            (Name: $"missing-desc-{Guid.NewGuid():N}"[..20], Body: "description: ", Expected: "description"),
+            (Name: $"empty-body-{Guid.NewGuid():N}"[..20], Body: "description: Empty body", Expected: "non-empty prompt body"),
+            (Name: $"bad-role-{Guid.NewGuid():N}"[..20], Body: "description: Bad role\nmodelRole: Worker", Expected: "modelRole"),
+            (Name: $"bad-timeout-{Guid.NewGuid():N}"[..20], Body: "description: Bad timeout\ntimeoutSeconds: 1", Expected: "timeoutSeconds"),
+            (Name: $"bad-prefill-{Guid.NewGuid():N}"[..20], Body: "description: Bad prefill\nprefillTimeoutSeconds: 1", Expected: "prefillTimeoutSeconds"),
+            (Name: $"bad-vis-{Guid.NewGuid():N}"[..20], Body: "description: Bad visibility\nvisibility: public", Expected: "visibility")
+        };
+
+        foreach (var testCase in cases)
+        {
+            var promptBody = testCase.Name.StartsWith("empty-body", StringComparison.Ordinal) ? "" : "Prompt body";
+            var agentMd = $"---\nname: {testCase.Name}\n{testCase.Body}\n---\n{promptBody}";
+            using var content = CreateSubAgentUpload(testCase.Name, "1.0.0", agentMd);
+
+            var response = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", content, ct);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+            var error = await response.Content.ReadFromJsonAsync<AgentSkillStore.Server.Models.ErrorResponse>(ct);
+            Assert.NotNull(error);
+            Assert.Contains(testCase.Expected, error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public async Task DeleteSubAgentVersion_RemovesVersion()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var subAgentName = $"delete-agent-{Guid.NewGuid():N}"[..20];
+        var agentMd = $"---\nname: {subAgentName}\ndescription: Delete test\n---\nPrompt body";
+
+        using var content = CreateSubAgentUpload(subAgentName, "1.0.0", agentMd);
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/subagents", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var deleteResponse = await _fixture.AuthenticatedHttpClient.DeleteAsync($"/api/v1/subagents/{subAgentName}/1.0.0", ct);
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+
+        var versions = await _fixture.HttpClient.GetFromJsonAsync<IReadOnlyList<AgentSkillStore.Server.Models.SubAgentVersionSummary>>(
+            $"/api/v1/subagents/{subAgentName}", ct);
+        Assert.NotNull(versions);
+        Assert.Empty(versions);
+    }
+
+    [Fact]
+    public async Task GetBlob_ByDigest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"blob-test-{Guid.NewGuid():N}"[..20];
+
+        // Upload a skill first
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing blob endpoint
+            ---
+
+            # Blob Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+
+        // Get the version to find the digest
+        var version = await _fixture.Client.GetVersionAsync(skillName, "1.0.0", ct);
+        Assert.NotNull(version);
+
+        // Download via blob endpoint
+        await using var blobStream = await _fixture.Client.GetBlobAsync(version.Sha256, ct);
+        using var reader = new StreamReader(blobStream);
+        var blobContent = await reader.ReadToEndAsync(ct);
+
+        Assert.Contains("# Blob Test", blobContent);
+    }
+
+    [Fact]
+    public async Task DeleteVersion_RemovesSkill()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"del-test-{Guid.NewGuid():N}"[..20];
+
+        // Upload a skill
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing delete
+            ---
+
+            # Delete Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+
+        // Verify it exists
+        var version = await _fixture.Client.GetVersionAsync(skillName, "1.0.0", ct);
+        Assert.NotNull(version);
+
+        // Delete it (requires auth)
+        var deleteResponse = await _fixture.AuthenticatedHttpClient.DeleteAsync($"/api/v1/skills/{skillName}/1.0.0", ct);
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+
+        // Verify it's gone
+        var versions = await _fixture.Client.GetSkillVersionsAsync(skillName, ct);
+        Assert.Empty(versions);
+    }
+
+    [Fact]
+    public async Task Pagination_WorksCorrectly()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var prefix = $"page-{Guid.NewGuid():N}"[..10];
+
+        // Upload multiple skills
+        for (int i = 1; i <= 3; i++)
+        {
+            var skillName = $"{prefix}-{i}";
+            var skillContent = $"""
+                ---
+                name: {skillName}
+                description: Pagination test skill {i}
+                ---
+
+                # Page Test {i}
+                """;
+
+            using var content = new MultipartFormDataContent();
+            content.Add(new StringContent(skillName), "name");
+            content.Add(new StringContent("1.0.0"), "version");
+
+            var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+            content.Add(fileContent, "file", "SKILL.md");
+
+            await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        }
+
+        // Test pagination - get all skills then verify we can paginate
+        var allSkills = await _fixture.Client.ListSkillsAsync(ct: ct);
+        var ourSkills = allSkills.Where(s => s.Name.StartsWith(prefix)).ToList();
+        Assert.Equal(3, ourSkills.Count);
+
+        // Test take
+        var limited = await _fixture.Client.ListSkillsAsync(take: 2, ct: ct);
+        Assert.Equal(2, limited.Count);
+    }
+
+    [Fact]
+    public async Task UploadSkill_WithoutApiKey_Returns401()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent("no-auth-test"), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent("---\nname: no-auth-test\ndescription: test\n---\n# Test"u8.ToArray());
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var response = await _fixture.HttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteSkill_WithoutApiKey_Returns401()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var response = await _fixture.HttpClient.DeleteAsync("/api/v1/skills/nonexistent/1.0.0", ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadSkill_WithInvalidApiKey_Returns403()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent("bad-key-test"), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent("---\nname: bad-key-test\ndescription: test\n---\n# Test"u8.ToArray());
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/skills");
+        request.Content = content;
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "sk-invalid-key");
+
+        var response = await _fixture.HttpClient.SendAsync(request, ct);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task WriteEndpoints_WithReadOnlyApiKey_Return403()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var createResponse = await _fixture.AuthenticatedHttpClient.PostAsJsonAsync(
+            "/api/v1/api-keys",
+            new { label = "read-only-write-test", scopes = new[] { "skills:read" } },
+            ct);
+        createResponse.EnsureSuccessStatusCode();
+
+        var jsonOptions = new JsonSerializerOptions
+        {
+            TypeInfoResolver = AgentSkillStoreClientJsonContext.Default
+        };
+        var created = await createResponse.Content.ReadFromJsonAsync<CreateApiKeyResponse>(jsonOptions, ct);
+        Assert.NotNull(created);
+
+        using var skillContent = new MultipartFormDataContent();
+        skillContent.Add(new StringContent("read-only-skill"), "name");
+        skillContent.Add(new StringContent("1.0.0"), "version");
+        skillContent.Add(
+            new ByteArrayContent("---\nname: read-only-skill\ndescription: test\n---\n# Test"u8.ToArray()),
+            "file",
+            "SKILL.md");
+        using var skillUpload = new HttpRequestMessage(HttpMethod.Post, "/api/v1/skills")
+        {
+            Content = skillContent
+        };
+        skillUpload.Headers.Authorization = new AuthenticationHeaderValue("Bearer", created.Key);
+
+        using var subAgentContent = CreateSubAgentUpload(
+            "read-only-subagent",
+            "1.0.0",
+            "---\nname: read-only-subagent\ndescription: test\n---\n# Test");
+        using var subAgentUpload = new HttpRequestMessage(HttpMethod.Post, "/api/v1/subagents")
+        {
+            Content = subAgentContent
+        };
+        subAgentUpload.Headers.Authorization = new AuthenticationHeaderValue("Bearer", created.Key);
+
+        using var skillDelete = new HttpRequestMessage(
+            HttpMethod.Delete,
+            "/api/v1/skills/read-only-skill/1.0.0");
+        skillDelete.Headers.Authorization = new AuthenticationHeaderValue("Bearer", created.Key);
+        using var subAgentDelete = new HttpRequestMessage(
+            HttpMethod.Delete,
+            "/api/v1/subagents/read-only-subagent/1.0.0");
+        subAgentDelete.Headers.Authorization = new AuthenticationHeaderValue("Bearer", created.Key);
+
+        foreach (var request in new[] { skillUpload, subAgentUpload, skillDelete, subAgentDelete })
+        {
+            using var response = await _fixture.HttpClient.SendAsync(request, ct);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+
+        using var deleteResponse = await _fixture.AuthenticatedHttpClient.DeleteAsync(
+            $"/api/v1/api-keys/{created.Id}",
+            ct);
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetSkills_WithoutApiKey_Returns200()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var response = await _fixture.HttpClient.GetAsync("/api/v1/skills", ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ApiKeyManagement_CreateListDelete_EndToEnd()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // Create a new key
+        var createResponse = await _fixture.AuthenticatedHttpClient.PostAsJsonAsync("/api/v1/api-keys",
+            new { label = "test-key" }, ct);
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+
+        var jsonOptions = new JsonSerializerOptions
+        {
+            TypeInfoResolver = AgentSkillStoreClientJsonContext.Default
+        };
+        var created = await createResponse.Content.ReadFromJsonAsync<AgentSkillStore.Client.CreateApiKeyResponse>(jsonOptions, ct);
+        Assert.NotNull(created);
+        Assert.Equal("test-key", created.Label);
+        Assert.StartsWith("sk-", created.Key);
+
+        // List keys
+        var listResponse = await _fixture.AuthenticatedHttpClient.GetAsync("/api/v1/api-keys", ct);
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+
+        var keys = await listResponse.Content.ReadFromJsonAsync<IReadOnlyList<AgentSkillStore.Client.ApiKeySummary>>(jsonOptions, ct);
+        Assert.NotNull(keys);
+        Assert.Contains(keys, k => k.Label == "test-key");
+
+        // Delete the new key (not the bootstrap key)
+        var deleteResponse = await _fixture.AuthenticatedHttpClient.DeleteAsync($"/api/v1/api-keys/{created.Id}", ct);
+        Assert.Equal(HttpStatusCode.NoContent, deleteResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task SearchSkills_ReturnsMatchingResults()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var prefix = $"srch-{Guid.NewGuid():N}"[..10];
+        var skillName = $"{prefix}-finder";
+
+        // Upload a skill with a distinctive description
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Helps with kubernetes pod deployment orchestration
+            ---
+
+            # Search Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+
+        // Search by description keyword
+        var results = await _fixture.Client.SearchSkillsAsync("kubernetes", ct: ct);
+        Assert.Contains(results, s => s.Name == skillName);
+
+        // Search by name
+        results = await _fixture.Client.SearchSkillsAsync(prefix, ct: ct);
+        Assert.Contains(results, s => s.Name == skillName);
+
+        // Search for non-existent term
+        results = await _fixture.Client.SearchSkillsAsync("zzz-nonexistent-zzz", ct: ct);
+        Assert.DoesNotContain(results, s => s.Name == skillName);
+    }
+
+    [Fact]
+    public async Task GetLatestVersion_ReturnsLatest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"latest-{Guid.NewGuid():N}"[..20];
+
+        // Upload v1.0.0
+        var skillContent1 = $"""
+            ---
+            name: {skillName}
+            description: Version one
+            ---
+
+            # V1
+            """;
+
+        using var content1 = new MultipartFormDataContent();
+        content1.Add(new StringContent(skillName), "name");
+        content1.Add(new StringContent("1.0.0"), "version");
+        var fileContent1 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent1));
+        fileContent1.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content1.Add(fileContent1, "file", "SKILL.md");
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content1, ct);
+
+        // Upload v2.0.0
+        var skillContent2 = $"""
+            ---
+            name: {skillName}
+            description: Version two
+            ---
+
+            # V2
+            """;
+
+        using var content2 = new MultipartFormDataContent();
+        content2.Add(new StringContent(skillName), "name");
+        content2.Add(new StringContent("2.0.0"), "version");
+        var fileContent2 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent2));
+        fileContent2.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content2.Add(fileContent2, "file", "SKILL.md");
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content2, ct);
+
+        // Get latest - should be v2.0.0
+        var latest = await _fixture.Client.GetLatestVersionAsync(skillName, ct);
+        Assert.NotNull(latest);
+        Assert.Equal("2.0.0", latest.Version);
+        Assert.True(latest.IsLatest);
+    }
+
+    [Fact]
+    public async Task GetLatestVersion_NotFound_Returns404()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var response = await _fixture.HttpClient.GetAsync("/api/v1/skills/nonexistent-skill/latest", ct);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task CheckUpdates_ReturnsUpdateStatus()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"upd-{Guid.NewGuid():N}"[..20];
+
+        // Upload v1.0.0
+        var skillContent1 = $"""
+            ---
+            name: {skillName}
+            description: Update check test
+            ---
+
+            # V1
+            """;
+
+        using var content1 = new MultipartFormDataContent();
+        content1.Add(new StringContent(skillName), "name");
+        content1.Add(new StringContent("1.0.0"), "version");
+        var fileContent1 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent1));
+        fileContent1.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content1.Add(fileContent1, "file", "SKILL.md");
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content1, ct);
+
+        // Upload v2.0.0
+        var skillContent2 = $"""
+            ---
+            name: {skillName}
+            description: Update check test v2
+            ---
+
+            # V2
+            """;
+
+        using var content2 = new MultipartFormDataContent();
+        content2.Add(new StringContent(skillName), "name");
+        content2.Add(new StringContent("2.0.0"), "version");
+        var fileContent2 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent2));
+        fileContent2.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content2.Add(fileContent2, "file", "SKILL.md");
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content2, ct);
+
+        // Check updates - asking about v1.0.0 should show update available
+        var updates = await _fixture.Client.CheckUpdatesAsync([
+            new AgentSkillStore.Client.CheckUpdateRequest { Name = skillName, Version = "1.0.0" },
+            new AgentSkillStore.Client.CheckUpdateRequest { Name = "nonexistent-skill", Version = "1.0.0" }
+        ], ct);
+
+        Assert.Equal(2, updates.Count);
+
+        var skillUpdate = updates.First(u => u.Name == skillName);
+        Assert.True(skillUpdate.HasUpdate);
+        Assert.Equal("1.0.0", skillUpdate.CurrentVersion);
+        Assert.Equal("2.0.0", skillUpdate.LatestVersion);
+
+        var missingSkill = updates.First(u => u.Name == "nonexistent-skill");
+        Assert.False(missingSkill.HasUpdate);
+    }
+
+    [Fact]
+    public async Task ApiKeyManagement_WithoutAuth_Returns401()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        var response = await _fixture.HttpClient.GetAsync("/api/v1/api-keys", ct);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ApiKeyManagement_WithEmptyDatabase_DoesNotAllowAnonymousBootstrap()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var dataPath = Path.Combine(Path.GetTempPath(), $"agent-skill-store-no-bootstrap-{Guid.NewGuid():N}");
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>()
+                .WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, configuration) =>
+                    configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["AgentSkillStore:DataPath"] = dataPath,
+                        ["AgentSkillStore:BootstrapApiKey"] = "",
+                        ["AgentSkillStore:SeedData"] = "false"
+                    })));
+            using var client = factory.CreateClient();
+
+            var service = factory.Services.GetRequiredService<ApiKeyService>();
+            Assert.Empty(await service.ListKeysAsync(ct));
+
+            using var response = await client.PostAsJsonAsync(
+                "/api/v1/api-keys",
+                new { label = "anonymous-bootstrap" },
+                ct);
+            Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task UploadSkill_DuplicateVersion_Returns409()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"dup-test-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing duplicate version
+            ---
+
+            # Duplicate Test
+            """;
+
+        // Upload the first version
+        using var content1 = new MultipartFormDataContent();
+        content1.Add(new StringContent(skillName), "name");
+        content1.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent1 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent1.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content1.Add(fileContent1, "file", "SKILL.md");
+
+        var uploadResponse1 = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content1, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse1.StatusCode);
+
+        // Upload the same version again - should return 409 Conflict
+        using var content2 = new MultipartFormDataContent();
+        content2.Add(new StringContent(skillName), "name");
+        content2.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent2 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent2.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content2.Add(fileContent2, "file", "SKILL.md");
+
+        var uploadResponse2 = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content2, ct);
+        Assert.Equal(HttpStatusCode.Conflict, uploadResponse2.StatusCode);
+
+        // Verify the response body contains the duplicate_version error
+        var errorBody = await uploadResponse2.Content.ReadFromJsonAsync<AgentSkillStore.Server.Models.ErrorResponse>(ct);
+        Assert.NotNull(errorBody);
+        Assert.Equal("duplicate_version", errorBody.Error);
+        Assert.Contains("already exists", errorBody.Message!);
+    }
+
+    [Fact]
+    public async Task UploadSkill_DifferentVersions_AreAllowed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"ver-test-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing different versions
+            ---
+
+            # Version Test
+            """;
+
+        // Upload v1.0.0
+        using var content1 = new MultipartFormDataContent();
+        content1.Add(new StringContent(skillName), "name");
+        content1.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent1 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent1.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content1.Add(fileContent1, "file", "SKILL.md");
+
+        var uploadResponse1 = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content1, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse1.StatusCode);
+
+        // Upload v2.0.0 - should succeed
+        using var content2 = new MultipartFormDataContent();
+        content2.Add(new StringContent(skillName), "name");
+        content2.Add(new StringContent("2.0.0"), "version");
+
+        var fileContent2 = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent2.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content2.Add(fileContent2, "file", "SKILL.md");
+
+        var uploadResponse2 = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content2, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse2.StatusCode);
+
+        // Verify both versions exist
+        var versions = await _fixture.Client.GetSkillVersionsAsync(skillName, ct);
+        Assert.Equal(2, versions.Count);
+    }
+
+    [Fact]
+    public async Task SearchSkills_WithPorterStemming_MatchesStemmedTerms()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var prefix = $"stem-{Guid.NewGuid():N}"[..10];
+        var skillName = $"{prefix}-closer";
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Helps sales reps close deal opportunities faster
+            ---
+
+            # Stemming Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+
+        // "closed deals" should match "close deal" via porter stemming
+        var results = await _fixture.Client.SearchSkillsAsync("closed deals", ct: ct);
+        Assert.Contains(results, s => s.Name == skillName);
+
+        // "closing" should match "close" via stemming
+        results = await _fixture.Client.SearchSkillsAsync("closing", ct: ct);
+        Assert.Contains(results, s => s.Name == skillName);
+    }
+
+    [Fact]
+    public async Task UploadSkillWithResources_EndToEnd()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"ref-test-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing resource file uploads
+            ---
+
+            # Resource Upload Test
+
+            See references/guide.md for details.
+            Run tools/check for local verification.
+            """;
+
+        var referenceContent = """
+            # Guide
+
+            This is a reference document with detailed examples.
+
+            ## Section One
+            First section content.
+
+            ## Section Two
+            Second section content.
+            """;
+
+        var scriptContent = """
+            #!/bin/bash
+            echo "setup complete"
+            """;
+
+        var toolContent = """
+            #!/bin/bash
+            echo "tool check complete"
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var refFileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(referenceContent));
+        refFileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(refFileContent, "resources", "references/guide.md");
+
+        var scriptFileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(scriptContent));
+        scriptFileContent.Headers.ContentType = new MediaTypeHeaderValue("application/x-sh");
+        content.Add(scriptFileContent, "resources", "scripts/setup.sh");
+
+        var toolFileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(toolContent));
+        toolFileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        content.Add(toolFileContent, "resources", "tools/check");
+
+        var resourceMetadata = JsonSerializer.Serialize(new[]
+        {
+            new { path = "tools/check", unixMode = 0x1ED }
+        });
+        content.Add(new StringContent(resourceMetadata, Encoding.UTF8, "application/json"), "resourceMetadata");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var version = await _fixture.Client.GetVersionAsync(skillName, "1.0.0", ct);
+        Assert.NotNull(version);
+        Assert.Equal(3, version.FileCount);
+
+        var listedResources = await _fixture.HttpClient.GetFromJsonAsync<IReadOnlyList<AgentSkillStore.Server.Models.SkillResourceSummary>>(
+            $"/api/v1/skills/{skillName}/1.0.0/resources", ct);
+        Assert.NotNull(listedResources);
+        Assert.Equal([
+            "references/guide.md",
+            "scripts/setup.sh",
+            "tools/check"
+        ], listedResources.Select(r => r.Path).ToArray());
+
+        var guideResource = Assert.Single(listedResources, r => r.Path == "references/guide.md");
+        Assert.Equal("text/markdown", guideResource.ContentType);
+        Assert.True(guideResource.Previewable);
+        Assert.Equal("markdown", guideResource.Language);
+        Assert.Equal(ComputeSha256Digest(Encoding.UTF8.GetBytes(referenceContent)), guideResource.Sha256);
+
+        var scriptResource = Assert.Single(listedResources, r => r.Path == "scripts/setup.sh");
+        Assert.Equal("application/x-sh", scriptResource.ContentType);
+        Assert.True(scriptResource.Previewable);
+        Assert.Equal("shell", scriptResource.Language);
+        Assert.Equal(ComputeSha256Digest(Encoding.UTF8.GetBytes(scriptContent)), scriptResource.Sha256);
+        Assert.EndsWith(
+            $"/api/v1/skills/{skillName}/1.0.0/scripts/setup.sh",
+            scriptResource.Url,
+            StringComparison.Ordinal);
+
+        var executableResource = Assert.Single(listedResources, r => r.Path == "tools/check");
+        Assert.Equal("application/octet-stream", executableResource.ContentType);
+        Assert.False(executableResource.Previewable);
+        Assert.Null(executableResource.Language);
+        Assert.Equal(0x1ED, executableResource.UnixMode);
+
+        var downloadedSkill = await _fixture.Client.GetSkillFileAsStringAsync(skillName, "1.0.0", ct: ct);
+        Assert.Contains("# Resource Upload Test", downloadedSkill);
+
+        var refResponse = await _fixture.HttpClient.GetAsync(
+            $"/api/v1/skills/{skillName}/1.0.0/references/guide.md", ct);
+        Assert.Equal(HttpStatusCode.OK, refResponse.StatusCode);
+        var refBody = await refResponse.Content.ReadAsStringAsync(ct);
+        Assert.Contains("# Guide", refBody);
+        Assert.Contains("Section One", refBody);
+
+        var scriptResponse = await _fixture.HttpClient.GetAsync(
+            $"/api/v1/skills/{skillName}/1.0.0/scripts/setup.sh", ct);
+        Assert.Equal(HttpStatusCode.OK, scriptResponse.StatusCode);
+        var scriptBody = await scriptResponse.Content.ReadAsStringAsync(ct);
+        Assert.Contains("setup complete", scriptBody);
+
+        var toolResponse = await _fixture.HttpClient.GetAsync(
+            $"/api/v1/skills/{skillName}/1.0.0/tools/check", ct);
+        Assert.Equal(HttpStatusCode.OK, toolResponse.StatusCode);
+        var toolBody = await toolResponse.Content.ReadAsStringAsync(ct);
+        Assert.Contains("tool check complete", toolBody);
+
+        var index = await _fixture.Client.GetRfcIndexAsync(ct);
+        Assert.NotNull(index);
+        var indexSkill = index.Skills.FirstOrDefault(s => s.Name == skillName);
+        Assert.NotNull(indexSkill);
+        Assert.Equal("archive", indexSkill!.Type);
+        Assert.EndsWith($"/api/v1/skills/{skillName}/1.0.0/archive.zip", indexSkill.Url, StringComparison.Ordinal);
+        Assert.NotEqual(version.Sha256, indexSkill.Digest);
+
+        var skillMdVerified = await _fixture.Client.VerifyDigestAsync(skillName, "1.0.0", version.Sha256, ct);
+        Assert.True(skillMdVerified);
+
+        var archiveResponse = await _fixture.HttpClient.GetAsync($"/api/v1/skills/{skillName}/1.0.0/archive.zip", ct);
+        Assert.Equal(HttpStatusCode.OK, archiveResponse.StatusCode);
+        Assert.Equal("application/zip", archiveResponse.Content.Headers.ContentType?.MediaType);
+
+        var archiveBytes = await archiveResponse.Content.ReadAsByteArrayAsync(ct);
+        Assert.Equal(indexSkill.Digest, ComputeSha256Digest(archiveBytes));
+
+        var nativeDetail = await _fixture.HttpClient.GetFromJsonAsync<AgentSkillStore.Server.Models.NativeSkillVersionDetail>(
+            $"/skills/v1/{skillName}/versions/1.0.0.json", ct);
+        Assert.NotNull(nativeDetail);
+        Assert.Equal(indexSkill.Type, nativeDetail.Artifact.Type);
+        Assert.Equal(indexSkill.Url, nativeDetail.Artifact.Url);
+        Assert.Equal(indexSkill.Digest, nativeDetail.Artifact.Digest);
+
+        using var archiveStream = new MemoryStream(archiveBytes);
+        using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read);
+        Assert.Equal([
+            "SKILL.md",
+            "references/guide.md",
+            "scripts/setup.sh",
+            "tools/check"
+        ], archive.Entries.Select(e => e.FullName).ToArray());
+
+        Assert.Equal(0x1ED, GetUnixMode(archive.GetEntry("tools/check")!));
+
+        using var archivedSkillReader = new StreamReader(archive.GetEntry("SKILL.md")!.Open());
+        var archivedSkill = await archivedSkillReader.ReadToEndAsync(ct);
+        Assert.Contains("# Resource Upload Test", archivedSkill);
+
+        var resources = indexSkill!.Resources;
+        Assert.NotNull(resources);
+        Assert.Equal(3, resources!.Count);
+        Assert.Contains(resources, r => r.Path == "references/guide.md");
+        Assert.Contains(resources, r => r.Path == "scripts/setup.sh");
+        Assert.Contains(resources, r => r.Path == "tools/check" && r.UnixMode == 0x1ED);
+    }
+
+    [Fact]
+    public async Task UploadSkillWithResources_WithoutResources_StillWorks()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"noref-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing upload without resources still works
+            ---
+
+            # No Resources Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.Created, uploadResponse.StatusCode);
+
+        var version = await _fixture.Client.GetVersionAsync(skillName, "1.0.0", ct);
+        Assert.NotNull(version);
+        Assert.Equal(0, version.FileCount);
+
+        var resources = await _fixture.HttpClient.GetFromJsonAsync<IReadOnlyList<AgentSkillStore.Server.Models.SkillResourceSummary>>(
+            $"/api/v1/skills/{skillName}/1.0.0/resources", ct);
+        Assert.NotNull(resources);
+        Assert.Empty(resources);
+    }
+
+    [Fact]
+    public async Task UploadSkillWithResources_InvalidPath_ReturnsBadRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"badpath-{Guid.NewGuid():N}"[..20];
+
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing invalid resource path rejection
+            ---
+
+            # Bad Path Test
+            """;
+
+        using var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var badFile = new ByteArrayContent(Encoding.UTF8.GetBytes("exploit"));
+        badFile.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        content.Add(badFile, "resources", "../etc/passwd");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, uploadResponse.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("C:/temp/tool")]
+    [InlineData("C:\\temp\\tool")]
+    public async Task UploadSkillWithResources_WindowsDrivePath_ReturnsBadRequest(string path)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"drivepath-{Guid.NewGuid():N}"[..20];
+
+        using var content = CreateResourceUploadContent(skillName, path, "exploit");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, uploadResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadSkillWithResources_DangerousUnixMode_ReturnsBadRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"badmode-{Guid.NewGuid():N}"[..20];
+
+        using var content = CreateResourceUploadContent(skillName, "tools/check", "#!/bin/sh\necho ok\n");
+        var resourceMetadata = JsonSerializer.Serialize(new[]
+        {
+            new { path = "tools/check", unixMode = 0xFED }
+        });
+        content.Add(new StringContent(resourceMetadata, Encoding.UTF8, "application/json"), "resourceMetadata");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, uploadResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task UploadSkillWithResources_UnmatchedResourceMetadata_ReturnsBadRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var skillName = $"badmetadata-{Guid.NewGuid():N}"[..20];
+
+        using var content = CreateResourceUploadContent(skillName, "tools/check", "#!/bin/sh\necho ok\n");
+        var resourceMetadata = JsonSerializer.Serialize(new[]
+        {
+            new { path = "tools/missing", unixMode = 0x1ED }
+        });
+        content.Add(new StringContent(resourceMetadata, Encoding.UTF8, "application/json"), "resourceMetadata");
+
+        var uploadResponse = await _fixture.AuthenticatedHttpClient.PostAsync("/api/v1/skills", content, ct);
+        Assert.Equal(HttpStatusCode.BadRequest, uploadResponse.StatusCode);
+    }
+
+    private static int GetUnixMode(ZipArchiveEntry entry)
+        => (entry.ExternalAttributes >> 16) & 0x1FF;
+
+    private static MultipartFormDataContent CreateResourceUploadContent(string skillName, string resourcePath, string resourceContent)
+    {
+        var skillContent = $"""
+            ---
+            name: {skillName}
+            description: Testing resource validation
+            ---
+
+            # Resource Validation Test
+            """;
+
+        var content = new MultipartFormDataContent();
+        content.Add(new StringContent(skillName), "name");
+        content.Add(new StringContent("1.0.0"), "version");
+
+        var fileContent = new ByteArrayContent(Encoding.UTF8.GetBytes(skillContent));
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/markdown");
+        content.Add(fileContent, "file", "SKILL.md");
+
+        var resourceFile = new ByteArrayContent(Encoding.UTF8.GetBytes(resourceContent));
+        resourceFile.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        content.Add(resourceFile, "resources", resourcePath);
+
+        return content;
+    }
+}

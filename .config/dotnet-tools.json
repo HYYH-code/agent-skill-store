@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "isRoot": true,
+  "tools": {
+    "incrementalist.cmd": {
+      "version": "1.2.0",
+      "commands": [
+        "incrementalist"
+      ],
+      "rollForward": false
+    },
+    "slopwatch.cmd": {
+      "version": "0.4.2",
+      "commands": [
+        "slopwatch"
+      ],
+      "rollForward": false
+    }
+  }
+}

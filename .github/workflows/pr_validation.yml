@@ -1,0 +1,179 @@
+name: PR Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Test
+        working-directory: web
+        run: npm test
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Build
+        working-directory: web
+        run: npm run build
+      - name: Verify committed web build
+        run: git diff --exit-code -- src/AgentSkillStore.Server/wwwroot
+      - name: Scan compiled assets
+        shell: bash
+        run: |
+          legacy_pattern='Zhi''qing|智''擎|技术''中心|\bI''DC\b|Net''claw|zq''skill|skill''server'
+          if rg -n -i "$legacy_pattern" src/AgentSkillStore.Server/wwwroot; then
+            echo "Removed brand content found in compiled frontend assets." >&2
+            exit 1
+          fi
+
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Restore
+        run: dotnet restore AgentSkillStore.slnx
+      - name: Build
+        run: dotnet build AgentSkillStore.slnx -c Release --no-restore
+      - name: Unit tests
+        run: dotnet test tests/AgentSkillStore.Tests/AgentSkillStore.Tests.csproj -c Release --no-build
+      - name: Integration tests
+        run: dotnet test tests/AgentSkillStore.Integration.Tests/AgentSkillStore.Integration.Tests.csproj -c Release --no-build
+      - name: CLI tests
+        run: dotnet test tests/AgentSkillStore.Cli.Tests/AgentSkillStore.Cli.Tests.csproj -c Release --no-build
+
+  e2e:
+    name: Browser E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Build frontend
+        working-directory: web
+        run: npm ci && npm run build
+      - name: Build E2E project
+        run: dotnet build tests/AgentSkillStore.E2E.Tests/AgentSkillStore.E2E.Tests.csproj -c Release
+      - name: Install Chromium
+        shell: pwsh
+        run: tests/AgentSkillStore.E2E.Tests/bin/Release/net10.0/playwright.ps1 install --with-deps chromium
+      - name: Run E2E tests
+        run: dotnet test tests/AgentSkillStore.E2E.Tests/AgentSkillStore.E2E.Tests.csproj -c Release --no-build
+
+  cli-smoke:
+    name: CLI Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Publish linux-x64
+        run: >-
+          dotnet publish src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj
+          -c Release -r linux-x64 --self-contained true
+          -p:PublishSingleFile=true -p:TreatWarningsAsErrors=true
+          -o artifacts/cli/linux-x64
+      - name: Smoke test
+        run: |
+          artifacts/cli/linux-x64/skillstore --version
+          artifacts/cli/linux-x64/skillstore --help
+          artifacts/cli/linux-x64/skillstore api-key generate | head -n 1 | grep -E '^sk-[A-Za-z0-9_-]{43}$'
+      - name: Pack NuGet packages
+        run: |
+          dotnet pack src/AgentSkillStore.Client/AgentSkillStore.Client.csproj -c Release -o artifacts/nuget
+          dotnet pack src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj -c Release -o artifacts/nuget
+
+  scripts:
+    name: Script Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: shellcheck scripts/install-skillstore.sh scripts/skillstore
+      - name: PowerShell parse
+        shell: pwsh
+        run: |
+          foreach ($path in @('scripts/install-skillstore.ps1', 'scripts/skillstore.ps1')) {
+            $errors = $null
+            [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw $path), [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          }
+
+  repository-scan:
+    name: Repository Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan removed brands and private paths
+        shell: bash
+        run: |
+          legacy_pattern='Zhi''qing|智''擎|技术''中心|\bI''DC\b|Net''claw|zq''skill|skill''server'
+          if rg -n -i "$legacy_pattern" . \
+            --glob '!UPSTREAM.md' --glob '!NOTICE' --glob '!LICENSE' --glob '!.git/**'; then
+            echo "Removed brand content found." >&2
+            exit 1
+          fi
+          path_pattern='C:\\''Users\\|/Users/[^/]+/(Documents|Desktop|Downloads|Library|AppData)/|/home/[^/]+/(Documents|Desktop|Downloads|projects|workspace)/'
+          if rg -n -i "$path_pattern" . --glob '!.git/**'; then
+            echo "Personal filesystem paths found." >&2
+            exit 1
+          fi
+      - name: Scan sensitive and generated files
+        shell: bash
+        run: |
+          forbidden='\.(docx|doc|pdf|pfx|p12|pem|key|sqlite|db|zip|tar|tgz|nupkg|snupkg)$|(^|/)\.env($|\.)|(^|/)id_rsa$|^data/'
+          if git ls-files | rg -n -i "$forbidden"; then
+            echo "Sensitive or generated file is tracked." >&2
+            exit 1
+          fi
+          key_pattern='s''k-[A-Za-z0-9_-]{40,}'
+          if rg -n --hidden --glob '!.git/**' "$key_pattern" .; then
+            echo "Possible real API Key found." >&2
+            exit 1
+          fi
+
+  container:
+    name: Container Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f docker/Dockerfile -t agent-skill-store:pr .
+      - name: Validate Compose
+        env:
+          AGENT_SKILL_STORE_BASEURL: https://skills.example.com
+          AGENT_SKILL_STORE_ADMIN_PASSWORD: strong-development-password
+        run: docker compose -f docker/docker-compose.yml config

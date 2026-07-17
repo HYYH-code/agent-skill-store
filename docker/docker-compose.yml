@@ -1,0 +1,38 @@
+services:
+  agent-skill-store:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: agent-skill-store:0.1.0
+    container_name: agent-skill-store
+    ports:
+      - "8081:8080"
+    volumes:
+      - agent-skill-store-data:/data
+    environment:
+      - AGENTSKILLSTORE__DATAPATH=/data
+      - AGENTSKILLSTORE__BASEURL=${AGENT_SKILL_STORE_BASEURL:?set AGENT_SKILL_STORE_BASEURL}
+      - AGENTSKILLSTORE__BOOTSTRAPAPIKEY=${AGENT_SKILL_STORE_BOOTSTRAP_API_KEY:-}
+      - AGENTSKILLSTORE__AUTH__MODE=local
+      - AGENTSKILLSTORE__AUTH__USERS__0__USERNAME=${AGENT_SKILL_STORE_ADMIN_USERNAME:-admin}
+      - AGENTSKILLSTORE__AUTH__USERS__0__PASSWORD=${AGENT_SKILL_STORE_ADMIN_PASSWORD:?set AGENT_SKILL_STORE_ADMIN_PASSWORD}
+      - AGENTSKILLSTORE__AUTH__USERS__0__DISPLAYNAME=Platform Administrator
+      - AGENTSKILLSTORE__AUTH__USERS__0__TEAM=Platform Team
+      - AGENTSKILLSTORE__AUTH__USERS__0__ROLES__0=engineer
+      - AGENTSKILLSTORE__AUTH__USERS__0__ROLES__1=author
+      - AGENTSKILLSTORE__AUTH__USERS__0__ROLES__2=review_admin
+      - AGENTSKILLSTORE__AUTH__USERS__0__ROLES__3=platform_admin
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  agent-skill-store-data:

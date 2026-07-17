@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 208" role="img" aria-labelledby="title description">
+  <title id="title">Agent Skill Store</title>
+  <desc id="description">Discover. Govern. Install.</desc>
+  <g transform="translate(24 24) scale(.625)">
+    <path fill="#20262E" d="M24 24h88v64H80v40H24V24Z"/>
+    <path fill="#087F5B" d="M144 24h88v104h-56V88h-32V24Z"/>
+    <path fill="#E54B5D" d="M24 144h48l40 32v32l16 16H24v-80Z"/>
+    <path fill="#20262E" d="M232 144h-48l-40 32v32l-16 16h104v-80Z"/>
+  </g>
+  <text x="208" y="94" fill="#20262E" font-family="Inter, Arial, sans-serif" font-size="54" font-weight="700">Agent Skill Store</text>
+  <text x="210" y="132" fill="#087F5B" font-family="Inter, Arial, sans-serif" font-size="21" font-weight="600">Discover. Govern. Install.</text>
+</svg>
