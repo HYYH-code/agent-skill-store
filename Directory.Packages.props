@@ -2,7 +2,7 @@
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
-    <AspireVersion>13.1.2</AspireVersion>
+    <AspireVersion>13.4.6</AspireVersion>
   </PropertyGroup>
 
   <!-- ASP.NET Core Dependencies -->
