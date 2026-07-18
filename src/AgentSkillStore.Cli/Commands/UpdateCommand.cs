@@ -30,7 +30,8 @@ internal static class UpdateCommand
                 args.InstallRoot,
                 args.Force,
                 args.AllowNonStable,
-                args.Yes);
+                args.Yes,
+                InstallCommand.ResolveScope(args));
             InstallCommand.WriteResult(result, args.OutputFormat);
             return 0;
         }
@@ -44,7 +45,8 @@ internal static class UpdateCommand
     private static void PrintHelp()
     {
         Console.WriteLine("Usage: skillstore update <name> [options]");
-        Console.WriteLine("  --target <codex|claude|pi>");
+        Console.WriteLine("  --target <all|codex|claude|pi|opencode|agents>");
+        Console.WriteLine("  --scope <user|project>");
         Console.WriteLine("  --allow-non-stable");
         Console.WriteLine("  --yes, -y                   Accept a declared permission expansion");
         Console.WriteLine("  --force");

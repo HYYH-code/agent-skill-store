@@ -34,7 +34,8 @@ internal static class InstallCommand
                 args.InstallRoot,
                 args.Force,
                 args.AllowNonStable,
-                args.Yes);
+                args.Yes,
+                ResolveScope(args));
             WriteResult(result, args.OutputFormat);
             return 0;
         }
@@ -47,8 +48,11 @@ internal static class InstallCommand
 
     internal static string ResolveTarget(ParsedArgs args)
     {
-        return string.IsNullOrWhiteSpace(args.Target) ? "codex" : args.Target;
+        return string.IsNullOrWhiteSpace(args.Target) ? "all" : args.Target;
     }
+
+    internal static string ResolveScope(ParsedArgs args) =>
+        string.IsNullOrWhiteSpace(args.Scope) ? "user" : args.Scope;
 
     internal static void WriteResult(InstallResult result, string? outputFormat)
     {
@@ -59,7 +63,9 @@ internal static class InstallCommand
         }
 
         ConsoleOutput.WriteSuccess(
-            $"Installed {result.Record.Name}@{result.Record.Version} for {result.Record.Target} to {result.Record.InstallPath}");
+            $"Installed {result.Record.Name}@{result.Record.Version} in {result.Record.Scope} scope at {result.Record.ActivePath}");
+        if (SkillBridgeManager.IsNativeAgentsTarget(result.Record.Target))
+            ConsoleOutput.WriteInfo("This Skill is visible to all Agent clients that discover .agents/skills.");
     }
 
     private static void PrintHelp()
@@ -67,8 +73,9 @@ internal static class InstallCommand
         Console.WriteLine("Usage: skillstore install <name> [version] [options]");
         Console.WriteLine();
         Console.WriteLine("Options:");
-        Console.WriteLine("  --target <codex|claude|pi>  Install target (default: codex)");
-        Console.WriteLine("  --install-root <path>       Override target install root");
+        Console.WriteLine("  --target <all|codex|claude|pi|opencode|agents>  Bridge target (default: all)");
+        Console.WriteLine("  --scope <user|project>      Installation scope (default: user)");
+        Console.WriteLine("  --install-root <path>       Override the .agents root (compatibility option)");
         Console.WriteLine("  --force                     Overwrite modified or unmanaged files");
         Console.WriteLine("  --allow-non-stable          Allow an explicit beta/deprecated version");
         Console.WriteLine("  --yes, -y                   Accept a declared permission expansion");

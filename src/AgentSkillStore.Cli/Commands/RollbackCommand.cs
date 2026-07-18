@@ -31,7 +31,9 @@ internal static class RollbackCommand
                 version,
                 args.Force,
                 args.AllowNonStable,
-                args.Yes);
+                args.Yes,
+                InstallCommand.ResolveScope(args),
+                args.InstallRoot);
             InstallCommand.WriteResult(result, args.OutputFormat);
             return 0;
         }
@@ -46,7 +48,8 @@ internal static class RollbackCommand
     {
         Console.WriteLine("Usage: skillstore rollback <name> [version] [options]");
         Console.WriteLine("  --version <version>         Roll back to a specific version");
-        Console.WriteLine("  --target <codex|claude|pi>");
+        Console.WriteLine("  --target <all|codex|claude|pi|opencode|agents>");
+        Console.WriteLine("  --scope <user|project>");
         Console.WriteLine("  --allow-non-stable");
         Console.WriteLine("  --yes, -y                   Accept a declared permission expansion");
         Console.WriteLine("  --force");

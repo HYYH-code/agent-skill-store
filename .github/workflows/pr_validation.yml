@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
@@ -108,6 +108,9 @@ jobs:
         run: |
           artifacts/cli/linux-x64/skillstore --version
           artifacts/cli/linux-x64/skillstore --help
+          test "$(artifacts/cli/linux-x64/skillstore doctor --output json)" = '[]'
+          test "$(artifacts/cli/linux-x64/skillstore bridge list --output json)" = '[]'
+          test "$(artifacts/cli/linux-x64/skillstore migrate --dry-run --output json)" = '[]'
           artifacts/cli/linux-x64/skillstore api-key generate | head -n 1 | grep -E '^sk-[A-Za-z0-9_-]{43}$'
       - name: Pack NuGet packages
         run: |

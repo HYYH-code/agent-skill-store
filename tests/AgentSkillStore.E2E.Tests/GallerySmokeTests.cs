@@ -3,16 +3,19 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
-using Aspire.Hosting;
-using Aspire.Hosting.ApplicationModel;
-using Aspire.Hosting.Testing;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using AgentSkillStore.Server.Services;
 using Xunit;
 
 namespace AgentSkillStore.E2E.Tests;
 
 public sealed class AppFixture : IAsyncLifetime
 {
-    private DistributedApplication? _app;
+    private readonly StringBuilder _serverLogs = new();
+    private Process? _serverProcess;
     private HttpClient? _httpClient;
     private string? _dataPath;
 
@@ -24,28 +27,46 @@ public sealed class AppFixture : IAsyncLifetime
     public async ValueTask InitializeAsync()
     {
         _dataPath = Path.Combine(Path.GetTempPath(), $"agent-skill-store-e2e-{Guid.NewGuid():N}");
-        var appHost = await DistributedApplicationTestingBuilder.CreateAsync<Projects.AgentSkillStore_Server>(
-            [$"--AgentSkillStore:DataPath={_dataPath}"]);
-        _app = await appHost.BuildAsync();
-        await _app.StartAsync();
+        var serverAssemblyPath = typeof(ApiKeyService).Assembly.Location;
+        var serverDirectory = Path.GetDirectoryName(serverAssemblyPath)
+                              ?? throw new InvalidOperationException("Unable to locate the server output directory.");
+        var port = GetAvailablePort();
+        ServiceEndpoint = $"http://127.0.0.1:{port}";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet",
+            WorkingDirectory = serverDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add(serverAssemblyPath);
+        startInfo.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
+        startInfo.Environment["ASPNETCORE_URLS"] = ServiceEndpoint;
+        startInfo.Environment["AGENTSKILLSTORE__BASEURL"] = ServiceEndpoint;
+        startInfo.Environment["AGENTSKILLSTORE__DATAPATH"] = _dataPath;
+        startInfo.Environment["AGENTSKILLSTORE__SEEDDATA"] = "true";
+        startInfo.Environment["AGENTSKILLSTORE__SEEDPATH"] = Path.Combine(serverDirectory, "seed");
 
-        using var startupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        await _app.ResourceNotifications.WaitForResourceAsync(
-            "agent-skill-store",
-            KnownResourceStates.Running,
-            startupTimeout.Token);
+        _serverProcess = Process.Start(startInfo)
+                         ?? throw new InvalidOperationException("Unable to start AgentSkillStore.Server.");
+        _serverProcess.OutputDataReceived += (_, eventArgs) => AppendServerLog(eventArgs.Data);
+        _serverProcess.ErrorDataReceived += (_, eventArgs) => AppendServerLog(eventArgs.Data);
+        _serverProcess.BeginOutputReadLine();
+        _serverProcess.BeginErrorReadLine();
 
-        var endpoint = _app.GetEndpoint("agent-skill-store", "http");
-        ServiceEndpoint = endpoint.ToString().TrimEnd('/');
         _httpClient = new HttpClient
         {
-            BaseAddress = endpoint,
+            BaseAddress = new Uri(ServiceEndpoint),
             Timeout = TimeSpan.FromSeconds(2)
         };
 
         var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
         while (DateTimeOffset.UtcNow < deadline)
         {
+            if (_serverProcess.HasExited)
+                break;
             try
             {
                 using var response = await _httpClient.GetAsync("/health");
@@ -64,16 +85,48 @@ public sealed class AppFixture : IAsyncLifetime
             await Task.Delay(200);
         }
 
-        throw new TimeoutException($"Server at {endpoint} did not become ready within 30 seconds.");
+        var exitDetail = _serverProcess.HasExited ? $" Exit code: {_serverProcess.ExitCode}." : "";
+        var detail = _serverLogs.Length == 0 ? "No server logs were captured." : _serverLogs.ToString();
+        throw new TimeoutException(
+            $"Server at {ServiceEndpoint} did not become ready within 30 seconds.{exitDetail}{Environment.NewLine}{detail}");
     }
 
     public async ValueTask DisposeAsync()
     {
         _httpClient?.Dispose();
-        if (_app is not null)
-            await _app.DisposeAsync();
+        if (_serverProcess is not null)
+        {
+            if (!_serverProcess.HasExited)
+                _serverProcess.Kill(entireProcessTree: true);
+            await _serverProcess.WaitForExitAsync();
+            _serverProcess.Dispose();
+        }
         if (_dataPath is not null && Directory.Exists(_dataPath))
             Directory.Delete(_dataPath, recursive: true);
+    }
+
+    private static int GetAvailablePort()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    private void AppendServerLog(string? line)
+    {
+        if (line is null)
+            return;
+        lock (_serverLogs)
+        {
+            _serverLogs.AppendLine(line);
+        }
     }
 }
 

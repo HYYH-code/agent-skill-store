@@ -53,11 +53,17 @@ export AGENT_SKILL_STORE_API_KEY='<Bootstrap Key>'
 
 skillstore api-key create --label 'Build Agent'
 skillstore list
-skillstore install engineering/code-review-checklist@2.1.0 --target codex
-skillstore list installed --target codex
+skillstore install engineering/code-review-checklist@2.1.0
+skillstore list installed
+skillstore doctor
+
+# 项目级安装：写入 skillstore.lock.json
+skillstore install engineering/code-review-checklist@2.1.0 --scope project
+skillstore sync --scope project
 ```
 
 CLI 配置存放在 `~/.agent-skill-store/config.json`。原始 API Key 只返回一次，服务端仅保存 SHA-256。
+Skill 实体统一保存在 `~/.agents/.skillstore/packages`，当前版本通过 `~/.agents/skills/<name>` 暴露给 Codex、Pi 和 OpenCode；检测到 Claude 时，CLI 会在 `~/.claude/skills/<name>` 创建 Junction。
 
 ## 核心边界
 

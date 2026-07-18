@@ -24,10 +24,10 @@
   </PropertyGroup>
   <!-- Version Management -->
   <PropertyGroup>
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2.0</VersionPrefix>
     <VersionSuffix>
     </VersionSuffix>
-    <PackageReleaseNotes>Initial Agent Skill Store open-source release with governed publication, versioned discovery, Agent Key authentication, and the skillstore CLI.</PackageReleaseNotes>
+    <PackageReleaseNotes>Unified .agents Skill storage, versioned local packages, strict Agent bridges, project lockfiles, sync, doctor, and legacy migration.</PackageReleaseNotes>
   </PropertyGroup>
   <!-- Default: non-packable unless explicitly set -->
   <PropertyGroup>

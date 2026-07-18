@@ -15,12 +15,14 @@ internal sealed class ParsedArgs
     public string? ApiKey { get; init; }
     public string? OutputFormat { get; init; }
     public string? Target { get; init; }
+    public string? Scope { get; init; }
     public string? InstallRoot { get; init; }
     public bool Verbose { get; init; }
     public bool Help { get; init; }
     public bool Version { get; init; }
     public bool Force { get; init; }
     public bool DryRun { get; init; }
+    public bool Apply { get; init; }
     public bool Yes { get; init; }
     public bool AllowNonStable { get; init; }
     public string? VersionOverride { get; init; }
@@ -48,14 +50,14 @@ internal static class CliArgsParser
     public static ParsedArgs Parse(string[] args)
     {
         var positional = new List<string>();
-        string? serverUrl = null, apiKey = null, outputFormat = null, target = null, installRoot = null;
+        string? serverUrl = null, apiKey = null, outputFormat = null, target = null, scope = null, installRoot = null;
         string? versionOverride = null, search = null, label = null, expiresAt = null;
         string? agentId = null, machineHash = null, name = null, displayName = null, ns = null;
         string? owner = null, riskLevel = null, networkPolicy = null, changelog = null;
         var scopes = new List<string>();
         string? configKey = null, configValue = null;
         int? skip = null, take = null;
-        bool verbose = false, help = false, version = false, force = false, dryRun = false, yes = false;
+        bool verbose = false, help = false, version = false, force = false, dryRun = false, apply = false, yes = false;
         var allowNonStable = false;
 
         var command = "";
@@ -72,9 +74,9 @@ internal static class CliArgsParser
                 {
                     command = arg.ToLowerInvariant();
 
-                    if (command is "api-key" or "config" or "publish-all")
+                    if (command is "api-key" or "config" or "bridge" or "publish-all")
                     {
-                        if (command is "api-key" or "config" && i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                        if (command is "api-key" or "config" or "bridge" && i + 1 < args.Length && !args[i + 1].StartsWith('-'))
                         {
                             subCommand = args[++i].ToLowerInvariant();
                         }
@@ -103,6 +105,9 @@ internal static class CliArgsParser
                     break;
                 case "--target" or "--agent" when i + 1 < args.Length:
                     target = args[++i].ToLowerInvariant();
+                    break;
+                case "--scope" when command != "api-key" && i + 1 < args.Length:
+                    scope = args[++i].ToLowerInvariant();
                     break;
                 case "--install-root" when i + 1 < args.Length:
                     installRoot = args[++i];
@@ -134,7 +139,7 @@ internal static class CliArgsParser
                 case "--machine-hash" when i + 1 < args.Length:
                     machineHash = args[++i];
                     break;
-                case "--scope" when i + 1 < args.Length:
+                case "--scope" when command == "api-key" && i + 1 < args.Length:
                     scopes.Add(args[++i]);
                     break;
                 case "--name" when i + 1 < args.Length:
@@ -169,6 +174,9 @@ internal static class CliArgsParser
                     break;
                 case "--dry-run":
                     dryRun = true;
+                    break;
+                case "--apply":
+                    apply = true;
                     break;
                 case "--yes" or "-y":
                     yes = true;
@@ -207,12 +215,14 @@ internal static class CliArgsParser
             ApiKey = apiKey,
             OutputFormat = outputFormat,
             Target = target,
+            Scope = scope,
             InstallRoot = installRoot,
             Verbose = verbose,
             Help = help,
             Version = version,
             Force = force,
             DryRun = dryRun,
+            Apply = apply,
             Yes = yes,
             AllowNonStable = allowNonStable,
             VersionOverride = versionOverride,

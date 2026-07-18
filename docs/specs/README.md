@@ -2,7 +2,7 @@
 
 These specifications describe the public formats Agent Skill Store publishes and consumes.
 
-These documents describe the formats and trust boundaries implemented by the v0.1.0 server, client, and CLI.
+These documents describe the formats and trust boundaries implemented by the v0.2.0 server, client, and CLI.
 
 | Spec | Purpose |
 |------|---------|

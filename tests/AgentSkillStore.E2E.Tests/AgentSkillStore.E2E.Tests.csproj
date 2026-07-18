@@ -9,7 +9,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Aspire.Hosting.Testing" />
     <PackageReference Include="Microsoft.Playwright" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio">
@@ -24,7 +23,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\AgentSkillStore.AppHost\AgentSkillStore.AppHost.csproj" />
+    <ProjectReference Include="..\..\src\AgentSkillStore.Server\AgentSkillStore.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\src\AgentSkillStore.Server\seed\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <LinkBase>seed\</LinkBase>
+    </Content>
   </ItemGroup>
 
 </Project>

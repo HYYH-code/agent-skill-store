@@ -19,7 +19,12 @@ describe('Agent Skill Store CLI command helpers', () => {
     const commands = createCliCommandSet('quality/code-review@2.1.0', 'claude')
     expect(commands.install).toContain('--target claude')
     expect(commands.rollback).toContain('--version 2.1.0')
-    expect(cliAgentTargets.map((target) => target.id)).toEqual(['codex', 'claude', 'pi'])
-    expect(cliAgentTargets.find((target) => target.id === 'pi')?.skillRoot).toBe('~/.pi/agent/skills')
+    expect(cliAgentTargets.map((target) => target.id)).toEqual(['all', 'agents', 'codex', 'claude', 'pi', 'opencode'])
+    expect(cliAgentTargets.find((target) => target.id === 'pi')?.skillRoot).toBe('~/.agents/skills')
+  })
+
+  it('uses the shared agents root by default', () => {
+    expect(createCliCommand('install', 'quality/code-review@2.1.0', 'all'))
+      .toBe('skillstore install quality/code-review@2.1.0')
   })
 })

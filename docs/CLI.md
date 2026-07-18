@@ -54,23 +54,55 @@ Discovery is public by default and requires only a configured server URL.
 
 ## Local Installation
 
-Supported targets:
+The CLI keeps one versioned local package and exposes one active entry per Skill:
 
-| Target | Default Skill root |
+| Path | Purpose |
 | --- | --- |
-| `codex` | `~/.codex/skills` |
-| `claude` | `~/.claude/skills` |
-| `pi` | `~/.pi/agent/skills` |
+| `~/.agents/.skillstore/packages/<name>/<version>/<digest>` | Immutable user package |
+| `~/.agents/skills/<name>` | Current shared entry for Codex, Pi, and OpenCode |
+| `~/.claude/skills/<name>` | Junction to the shared entry when Claude is detected |
 
 ```bash
-skillstore install engineering/code-review-checklist@2.1.0 --target codex
-skillstore update engineering/code-review-checklist --target codex
-skillstore rollback engineering/code-review-checklist --target codex
-skillstore uninstall engineering/code-review-checklist --target codex
-skillstore list installed --target codex
+skillstore install engineering/code-review-checklist@2.1.0
+skillstore update engineering/code-review-checklist
+skillstore rollback engineering/code-review-checklist
+skillstore uninstall engineering/code-review-checklist
+skillstore list installed
+skillstore doctor
+skillstore sync
 ```
 
-Installation verifies the advertised SHA-256 digest before replacing local files. Permission expansion and destructive changes require explicit confirmation unless `--yes` is supplied.
+Installation verifies the advertised SHA-256 digest before activating an immutable package. Windows uses Junctions and Unix-like systems use symlinks. Link creation failure is fatal; the previous active entry remains in place. Codex, Pi, and OpenCode discover `.agents/skills` natively, so installing there makes a Skill visible to all three clients.
+
+### Project scope
+
+Project installs use the nearest Git root and write an exact lockfile:
+
+```bash
+skillstore install engineering/code-review-checklist@2.1.0 --scope project
+skillstore sync --scope project
+```
+
+This creates `skillstore.lock.json`. Generated package and bridge paths are added to local Git exclude files, while the lockfile remains suitable for source control. A project Skill that conflicts with a different user-level version is rejected rather than allowing Agent-specific version drift.
+
+### Bridges and migration
+
+Claude is the first non-native bridge target:
+
+```bash
+skillstore bridge add engineering/code-review-checklist --target claude
+skillstore bridge remove engineering/code-review-checklist --target claude
+skillstore bridge list
+```
+
+Inspect old direct installations before changing them:
+
+```bash
+skillstore migrate --dry-run
+skillstore migrate --apply
+```
+
+Migration only moves unchanged installations already managed by `skillstore`; unmanaged directories and conflicts are reported and never overwritten.
 
 ## Governed Publishing
 
@@ -101,8 +133,9 @@ The `publish`, `publish-all`, `delete`, `publish-subagent`, and `delete-subagent
 | `--server-url <url>` | Override the configured server |
 | `--api-key <key>` | Override the configured Agent Key |
 | `--output text\|json` | Select output format |
-| `--target codex\|claude\|pi` | Select local Agent target |
-| `--install-root <path>` | Override the local target directory |
+| `--target all\|codex\|claude\|pi\|opencode\|agents` | Select bridge behavior; `.agents` remains shared |
+| `--scope user\|project` | Select user or project installation scope |
+| `--install-root <path>` | Override the `.agents` root |
 | `--allow-non-stable` | Permit explicit beta or deprecated versions |
 | `--yes` | Confirm destructive changes or permission expansion |
 | `--verbose` | Enable request diagnostics without logging credentials |

@@ -180,7 +180,7 @@ function CliCommandLine({ command }: { command: string }) {
 }
 
 function CliWorkbench({ reference = '<namespace>/<skill>@<version>', compact = false }: { reference?: string; compact?: boolean }) {
-  const [agent, setAgent] = useState<CliAgentId>('codex')
+  const [agent, setAgent] = useState<CliAgentId>('all')
   const [action, setAction] = useState<CliAction>('install')
   const selectedTarget = cliAgentTargets.find((target) => target.id === agent) ?? cliAgentTargets[0]
   const command = createCliCommand(action, reference, agent)
@@ -301,7 +301,7 @@ function SkillDetailPage() {
 
 function InstallDrawer({ skill, version, open, onClose }: { skill: SkillSummary; version?: string; open: boolean; onClose: () => void }) {
   const [selectedVersion, setSelectedVersion] = useState(version ?? skill.recommendedVersion)
-  const [agent, setAgent] = useState<CliAgentId>('codex')
+  const [agent, setAgent] = useState<CliAgentId>('all')
   useEffect(() => { if (version) setSelectedVersion(version) }, [version])
   const reference = createSkillReference(skill.namespace, skill.name, selectedVersion)
   const commands = createCliCommandSet(reference, agent)
@@ -324,7 +324,7 @@ function InstallDrawer({ skill, version, open, onClose }: { skill: SkillSummary;
 }
 
 function CliPage() {
-  return <><PageHeader title="Agent Skill Store CLI" subtitle="选择目标 Agent，复制本机安装、升级、卸载和回滚命令" extra={<Button type="primary" icon={<AppstoreOutlined />} onClick={() => location.assign('/skills')}>浏览工装</Button>} /><Row gutter={[20, 20]}><Col span={16}><CliWorkbench /></Col><Col span={8}><Card title="常用命令" className="cli-side-card"><CliCommandLine command="skillstore login --server <skill-store-url> --api-key <key>" /><CliCommandLine command="skillstore list --output json" /><CliCommandLine command="skillstore list installed --target codex" /></Card></Col></Row></>
+  return <><PageHeader title="Agent Skill Store CLI" subtitle="使用共享 .agents 目录，并为非原生 Agent 管理桥接" extra={<Button type="primary" icon={<AppstoreOutlined />} onClick={() => location.assign('/skills')}>浏览工装</Button>} /><Row gutter={[20, 20]}><Col span={16}><CliWorkbench /></Col><Col span={8}><Card title="常用命令" className="cli-side-card"><CliCommandLine command="skillstore login --server <skill-store-url> --api-key <key>" /><CliCommandLine command="skillstore list --output json" /><CliCommandLine command="skillstore list installed" /><CliCommandLine command="skillstore doctor" /></Card></Col></Row></>
 }
 
 function PublishPage() {
@@ -437,7 +437,7 @@ function SystemPanel() {
 
 function AboutPage() {
   return <><PageHeader title="关于 Agent Skill Store" subtitle="Discover. Govern. Install." />
-    <Card className="about-card"><div className="about-brand"><LogoLockup /><h2>Discover. Govern. Install.</h2><p>一个可自托管的 Agent Skill 目录、治理后台和 CLI 安装入口，支持公开发现、独立审核、版本管理与本机安装。</p></div><Divider /><Descriptions column={{ xs: 1, sm: 1, md: 2 }} bordered items={[{ key: 'product', label: '项目名称', children: 'Agent Skill Store' }, { key: 'cli', label: 'CLI 命令', children: 'skillstore' }, { key: 'version', label: '当前版本', children: 'v0.1.0' }, { key: 'license', label: '开源许可', children: 'Apache License 2.0' }, { key: 'access', label: '访问模型', children: '公开浏览 · 受控发布' }, { key: 'deployment', label: '部署方式', children: 'Self-hosted' }]} /><Alert type="info" showIcon message="API Key 安全模型" description="Bootstrap Key 由 CLI 离线生成，服务端只保存 SHA-256；普通 Agent Key 的原文仅在创建时返回一次。" /><div className="about-links"><Button href="/.well-known/agent-skills/index.json" icon={<FileMarkdownOutlined />}>发现索引</Button><Button href="/manifest.json" icon={<CodeOutlined />}>原生清单</Button><Button href="/health" icon={<SafetyCertificateOutlined />}>服务状态</Button></div></Card>
+    <Card className="about-card"><div className="about-brand"><LogoLockup /><h2>Discover. Govern. Install.</h2><p>一个可自托管的 Agent Skill 目录、治理后台和 CLI 安装入口，支持公开发现、独立审核、版本管理与本机安装。</p></div><Divider /><Descriptions column={{ xs: 1, sm: 1, md: 2 }} bordered items={[{ key: 'product', label: '项目名称', children: 'Agent Skill Store' }, { key: 'cli', label: 'CLI 命令', children: 'skillstore' }, { key: 'version', label: '当前版本', children: 'v0.2.0' }, { key: 'license', label: '开源许可', children: 'Apache License 2.0' }, { key: 'access', label: '访问模型', children: '公开浏览 · 受控发布' }, { key: 'deployment', label: '部署方式', children: 'Self-hosted' }]} /><Alert type="info" showIcon message="API Key 安全模型" description="Bootstrap Key 由 CLI 离线生成，服务端只保存 SHA-256；普通 Agent Key 的原文仅在创建时返回一次。" /><div className="about-links"><Button href="/.well-known/agent-skills/index.json" icon={<FileMarkdownOutlined />}>发现索引</Button><Button href="/manifest.json" icon={<CodeOutlined />}>原生清单</Button><Button href="/health" icon={<SafetyCertificateOutlined />}>服务状态</Button></div></Card>
   </>
 }
 

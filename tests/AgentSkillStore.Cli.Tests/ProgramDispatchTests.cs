@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 
 using System.Diagnostics;
+using System.Text.Json;
 using AgentSkillStore.Cli.Commands;
 using Xunit;
 
@@ -118,6 +119,19 @@ public sealed class ProgramDispatchTests : IDisposable
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("Agent Skill Store CLI", result.StdOut);
         Assert.DoesNotContain("AgentSkillStore Skill CLI", result.StdOut);
+    }
+
+    [Fact]
+    public async Task InstallRoot_PrintsOneCompatibilityNoticeWithoutPollutingJson()
+    {
+        var result = await RunCliAsync(
+            ["bridge", "list", "--install-root", _tempDir, "--output", "json"],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Single(result.StdErr.Split("Compatibility notice:", StringSplitOptions.None).Skip(1));
+        using var document = JsonDocument.Parse(result.StdOut);
+        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
     }
 
     [Fact]

@@ -21,7 +21,7 @@ detect_rid() {
         *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
     esac
     if [ "$os-$arch" = "osx-x64" ]; then
-        echo "The v0.1.0 release does not provide an osx-x64 binary." >&2
+        echo "The current release does not provide an osx-x64 binary." >&2
         exit 1
     fi
     printf '%s-%s\n' "$os" "$arch"

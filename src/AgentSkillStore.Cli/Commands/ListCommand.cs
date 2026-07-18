@@ -65,6 +65,11 @@ internal static class ListCommand
         var registry = new InstallationRegistry();
         var state = registry.Load();
         var installations = state.Installations.AsEnumerable();
+        if (!string.IsNullOrWhiteSpace(args.Scope))
+        {
+            installations = installations.Where(installation =>
+                string.Equals(installation.Scope, args.Scope, StringComparison.OrdinalIgnoreCase));
+        }
         if (!string.IsNullOrWhiteSpace(args.Target))
         {
             installations = installations.Where(i =>
@@ -85,13 +90,14 @@ internal static class ListCommand
             return 0;
         }
 
-        var headers = new[] { "NAME", "VERSION", "TARGET", "PATH" };
+        var headers = new[] { "NAME", "VERSION", "SCOPE", "LAYOUT", "PATH" };
         var rows = records.Select(r => new[]
         {
             r.Name,
             r.Version,
-            r.Target,
-            r.InstallPath
+            r.Scope,
+            r.Layout,
+            string.IsNullOrWhiteSpace(r.ActivePath) ? r.InstallPath : r.ActivePath
         }).ToList();
 
         ConsoleOutput.WriteTable(headers, rows);
