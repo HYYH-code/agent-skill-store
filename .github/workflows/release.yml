@@ -22,7 +22,7 @@ jobs:
         run: |
           dotnet pack src/AgentSkillStore.Client/AgentSkillStore.Client.csproj -c Release -p:PackageVersion="$VERSION" -o artifacts
           dotnet pack src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj -c Release -p:PackageVersion="$VERSION" -o artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-nuget
           path: artifacts/*.*nupkg
@@ -77,7 +77,7 @@ jobs:
         if: matrix.format == 'zip'
         shell: pwsh
         run: Compress-Archive -Path publish/* -DestinationPath "agent-skill-store-$env:VERSION-${{ matrix.rid }}.zip"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-cli-${{ matrix.rid }}
           path: agent-skill-store-*
@@ -98,7 +98,7 @@ jobs:
           --file docker/Dockerfile
           --output type=oci,dest=agent-skill-store-$VERSION.oci.tar
           .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-oci
           path: agent-skill-store-*.oci.tar
