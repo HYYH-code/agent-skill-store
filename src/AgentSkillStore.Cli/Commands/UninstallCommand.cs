@@ -27,14 +27,19 @@ internal static class UninstallCommand
             var name = args.Positional[0];
             var target = InstallCommand.ResolveTarget(args);
             var installer = new SkillInstaller(client, new InstallationRegistry(), server);
-            var removed = await installer.UninstallAsync(name, target, args.Force);
+            var removed = await installer.UninstallAsync(
+                name,
+                target,
+                args.Force,
+                InstallCommand.ResolveScope(args),
+                args.InstallRoot);
             if (args.OutputFormat == "json")
             {
                 Console.WriteLine(JsonSerializer.Serialize(removed, CliJsonContext.Default.IReadOnlyListString));
                 return 0;
             }
 
-            ConsoleOutput.WriteSuccess($"Uninstalled {name} from {target}. Removed {removed.Count} file(s).");
+            ConsoleOutput.WriteSuccess($"Uninstalled {name}. Removed {removed.Count} managed file(s).");
             return 0;
         }
         catch (Exception ex) when (ex is InvalidOperationException or IOException or ArgumentException)
@@ -47,7 +52,8 @@ internal static class UninstallCommand
     private static void PrintHelp()
     {
         Console.WriteLine("Usage: skillstore uninstall <name> [options]");
-        Console.WriteLine("  --target <codex|claude|pi>");
+        Console.WriteLine("  --target <all|codex|claude|pi|opencode|agents>");
+        Console.WriteLine("  --scope <user|project>");
         Console.WriteLine("  --force                     Remove modified managed files");
     }
 }

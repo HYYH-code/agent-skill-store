@@ -1,4 +1,4 @@
-export type CliAgentId = 'codex' | 'claude' | 'pi'
+export type CliAgentId = 'all' | 'agents' | 'codex' | 'claude' | 'pi' | 'opencode'
 export type CliAction = 'install' | 'update' | 'uninstall' | 'rollback'
 
 export type CliAgentTarget = {
@@ -8,9 +8,12 @@ export type CliAgentTarget = {
 }
 
 export const cliAgentTargets: CliAgentTarget[] = [
-  { id: 'codex', label: 'Codex', skillRoot: '~/.codex/skills' },
-  { id: 'claude', label: 'Claude Code', skillRoot: '~/.claude/skills' },
-  { id: 'pi', label: 'Pi', skillRoot: '~/.pi/agent/skills' },
+  { id: 'all', label: '全部 Agent', skillRoot: '~/.agents/skills' },
+  { id: 'agents', label: '通用 .agents', skillRoot: '~/.agents/skills' },
+  { id: 'codex', label: 'Codex（共享目录）', skillRoot: '~/.agents/skills' },
+  { id: 'claude', label: 'Claude Code（桥接）', skillRoot: '~/.claude/skills' },
+  { id: 'pi', label: 'Pi（共享目录）', skillRoot: '~/.agents/skills' },
+  { id: 'opencode', label: 'OpenCode（共享目录）', skillRoot: '~/.agents/skills' },
 ]
 
 export function createSkillReference(namespace: string, name: string, version?: string) {
@@ -20,10 +23,11 @@ export function createSkillReference(namespace: string, name: string, version?: 
 
 export function createCliCommand(action: CliAction, reference: string, agent: CliAgentId) {
   const [baseReference, version] = reference.split('@')
-  if (action === 'uninstall') return `skillstore uninstall ${baseReference} --target ${agent}`
-  if (action === 'update') return `skillstore update ${baseReference} --target ${agent}`
-  if (action === 'rollback') return `skillstore rollback ${baseReference}${version ? ` --version ${version}` : ''} --target ${agent}`
-  return `skillstore install ${reference} --target ${agent}`
+  const target = agent === 'all' ? '' : ` --target ${agent}`
+  if (action === 'uninstall') return `skillstore uninstall ${baseReference}${target}`
+  if (action === 'update') return `skillstore update ${baseReference}${target}`
+  if (action === 'rollback') return `skillstore rollback ${baseReference}${version ? ` --version ${version}` : ''}${target}`
+  return `skillstore install ${reference}${target}`
 }
 
 export function createCliCommandSet(reference: string, agent: CliAgentId) {

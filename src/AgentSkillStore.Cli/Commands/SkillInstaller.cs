@@ -37,13 +37,530 @@ internal sealed class SkillInstaller
         bool force,
         bool allowNonStable = false,
         bool acceptPermissionExpansion = false,
+        string scope = "user",
+        string? workingDirectory = null,
+        string? expectedDigest = null,
+        IReadOnlyList<string>? expectedPermissions = null,
+        bool updateLockFile = true,
         CancellationToken ct = default)
     {
         var reference = SkillReference.Parse(name, version);
+        target = string.IsNullOrWhiteSpace(target) ? "all" : target.ToLowerInvariant();
+        SkillBridgeManager.ValidateTarget(target);
+        var legacy = target == "all"
+            ? _registry.FindAnyLegacy(reference.Name)
+            : _registry.FindLegacy(reference.Name, target);
+        if (legacy is not null)
+        {
+            return await InstallLegacyAsync(
+                reference,
+                version,
+                legacy.Target,
+                installRoot,
+                force,
+                allowNonStable,
+                acceptPermissionExpansion,
+                ct);
+        }
+
+        var context = SkillStoreContext.Resolve(scope, installRoot, workingDirectory);
         var selected = await ResolveVersionAsync(reference.PackageName, reference.Version, allowNonStable, ct);
-        var root = ResolveInstallRoot(target, installRoot);
+        var installReference = await _client.GetInstallReferenceAsync(reference.PackageName, selected.Version, ct)
+                               ?? throw new InvalidOperationException(
+                                   $"No governed install reference found for '{reference.PackageName}@{selected.Version}'.");
+        ValidateInstallReference(reference.PackageName, selected, installReference);
+        var archiveDigest = NormalizeDigest(installReference.Digest);
+        if (!string.IsNullOrWhiteSpace(expectedDigest) &&
+            !string.Equals(archiveDigest, NormalizeDigest(expectedDigest), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"LOCK_DIGEST_MISMATCH: lockfile expects {NormalizeDigest(expectedDigest)}, server advertises {archiveDigest}.");
+        }
+
+        var grantedPermissions = FlattenPermissions(installReference.RequestedPermissions);
+        if (expectedPermissions is not null &&
+            !grantedPermissions.SequenceEqual(expectedPermissions.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("LOCK_PERMISSION_MISMATCH: server permissions differ from skillstore.lock.json.");
+        }
+
+        using var operationLock = SkillStoreOperationLock.Acquire(context.OperationLockPath);
+        var previous = _registry.Find(reference.Name, context);
+        if (context.Scope == "user")
+        {
+            var conflictingProject = _registry.Load().Installations.FirstOrDefault(record =>
+                string.Equals(record.Layout, "shared", StringComparison.Ordinal) &&
+                string.Equals(record.Scope, "project", StringComparison.Ordinal) &&
+                string.Equals(record.Name, reference.Name, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(NormalizeDigest(record.ArchiveHash), archiveDigest, StringComparison.OrdinalIgnoreCase));
+            if (conflictingProject is not null)
+            {
+                throw new InvalidOperationException(
+                    $"SCOPE_VERSION_CONFLICT: project installation {conflictingProject.Version} at '{conflictingProject.ProjectRoot}' conflicts with user version {selected.Version} for '{reference.Name}'.");
+            }
+        }
+
+        var expandedPermissions = previous is null
+            ? []
+            : grantedPermissions.Except(previous.GrantedPermissions, StringComparer.Ordinal).ToArray();
+        if (expandedPermissions.Length > 0 && !acceptPermissionExpansion)
+        {
+            throw new InvalidOperationException(
+                $"PERMISSION_CONFIRMATION_REQUIRED: {string.Join(", ", expandedPermissions)}. Re-run with --yes after reviewing the change.");
+        }
+
+        if (context.Scope == "project")
+        {
+            var userContext = SkillStoreContext.Resolve("user");
+            var userRecord = _registry.Find(reference.Name, userContext);
+            if (userRecord is not null)
+            {
+                if (!string.Equals(NormalizeDigest(userRecord.ArchiveHash), archiveDigest, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"SCOPE_VERSION_CONFLICT: user installation {userRecord.Version} conflicts with project version {selected.Version} for '{reference.Name}'.");
+                }
+
+                if (previous is null || previous.ReusesUserInstall)
+                {
+                    var reusedBridges = previous?.Bridges.ToList() ?? [];
+                    var createReusedClaudeBridge = SkillBridgeManager.ShouldCreateClaudeBridge(target);
+                    var hasManagedReusedClaudeBridge = reusedBridges.Any(bridge =>
+                        string.Equals(bridge.Target, "claude", StringComparison.OrdinalIgnoreCase));
+                    var reusedClaudeBridgePath = context.GetClaudeBridgePath(reference.PackageName);
+                    if (createReusedClaudeBridge || hasManagedReusedClaudeBridge)
+                        PreflightBridge(reusedClaudeBridgePath, userRecord.ActivePath);
+
+                    var reusedRecord = CreateSharedRecord(
+                        reference,
+                        selected.Version,
+                        target,
+                        context,
+                        userRecord.StorePath,
+                        userRecord.ActivePath,
+                        userRecord.Files,
+                        userRecord.FileHashes,
+                        grantedPermissions,
+                        archiveDigest,
+                        previous,
+                        reusedBridges,
+                        reusesUserInstall: true);
+                    var stateBeforeReuse = _registry.Load();
+                    var lockFileBeforeReuse = context.LockFilePath is not null && File.Exists(context.LockFilePath)
+                        ? File.ReadAllText(context.LockFilePath)
+                        : null;
+                    var reusedBridgeCreated = false;
+                    try
+                    {
+                        if (createReusedClaudeBridge || hasManagedReusedClaudeBridge)
+                        {
+                            var claudeBridgeIndex = reusedBridges.FindIndex(bridge =>
+                                string.Equals(bridge.Target, "claude", StringComparison.OrdinalIgnoreCase));
+                            if (claudeBridgeIndex < 0)
+                            {
+                                reusedBridges.Add(SkillBridgeManager.CreateClaudeBridge(
+                                    context,
+                                    reference.PackageName,
+                                    userRecord.ActivePath));
+                                reusedBridgeCreated = true;
+                            }
+                            else if (!DirectoryLinkManager.Exists(reusedBridges[claudeBridgeIndex].Path))
+                            {
+                                reusedBridges[claudeBridgeIndex] = SkillBridgeManager.CreateClaudeBridge(
+                                    context,
+                                    reference.PackageName,
+                                    userRecord.ActivePath);
+                                reusedBridgeCreated = true;
+                            }
+
+                            reusedRecord = reusedRecord with { Bridges = reusedBridges };
+                        }
+
+                        _registry.Upsert(reusedRecord, previous);
+                        if (updateLockFile && context.LockFilePath is not null)
+                            SkillStoreLockFileManager.Upsert(context.LockFilePath, _server, reusedRecord);
+                        GitExcludeManager.AddManagedPaths(context, reference.PackageName, reusedBridges.Count > 0);
+                        return new InstallResult(reusedRecord, []);
+                    }
+                    catch
+                    {
+                        if (reusedBridgeCreated)
+                            DirectoryLinkManager.Remove(reusedClaudeBridgePath, userRecord.ActivePath);
+                        _registry.Restore(stateBeforeReuse);
+                        RestoreLockFile(context.LockFilePath, lockFileBeforeReuse);
+                        throw;
+                    }
+                }
+            }
+        }
+
+        var archiveBytes = await DownloadArchiveAsync(installReference, selected, ct);
+        var archiveHash = ComputeSha256Digest(archiveBytes);
+        if (!string.Equals(archiveHash, archiveDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"DIGEST_MISMATCH: expected {archiveDigest}, downloaded {archiveHash}.");
+        }
+
+        var entries = ReadArchiveEntries(archiveBytes);
+        if (previous is not null)
+            EnsureManagedFilesUnmodified(previous, force);
+
+        var packagePath = context.GetPackagePath(reference.PackageName, selected.Version, archiveHash);
+        var activePath = context.GetActivePath(reference.PackageName);
+        PreflightManagedActivePath(previous, activePath);
+
+        var bridges = previous?.Bridges.ToList() ?? [];
+        var createClaudeBridge = SkillBridgeManager.ShouldCreateClaudeBridge(target);
+        var hasManagedClaudeBridge = bridges.Any(bridge =>
+            string.Equals(bridge.Target, "claude", StringComparison.OrdinalIgnoreCase));
+        var claudeBridgePath = context.GetClaudeBridgePath(reference.PackageName);
+        if (createClaudeBridge || hasManagedClaudeBridge)
+            PreflightBridge(claudeBridgePath, activePath);
+
+        var stateBefore = _registry.Load();
+        var lockFileBefore = context.LockFilePath is not null && File.Exists(context.LockFilePath)
+            ? File.ReadAllText(context.LockFilePath)
+            : null;
+        var operationId = Guid.NewGuid().ToString("N");
+        var stagingRoot = SkillStoreContext.EnsureChildPath(context.StateRoot, Path.Combine("staging", operationId));
+        var stagedPackagePath = SkillStoreContext.EnsureChildPath(stagingRoot, reference.PackageName);
+        var packageCreated = false;
+        var activeSwitched = false;
+        var bridgeCreated = false;
+        string? oldActiveTarget = null;
+
+        try
+        {
+            if (Directory.Exists(packagePath))
+            {
+                EnsurePackageMatches(packagePath, entries);
+            }
+            else
+            {
+                Directory.CreateDirectory(stagedPackagePath);
+                await WriteEntriesAsync(stagedPackagePath, entries, ct);
+                Directory.CreateDirectory(Path.GetDirectoryName(packagePath)!);
+                Directory.Move(stagedPackagePath, packagePath);
+                packageCreated = true;
+            }
+
+            oldActiveTarget = DirectoryLinkManager.Replace(
+                activePath,
+                packagePath,
+                previous is { ReusesUserInstall: false } ? previous.StorePath : null);
+            activeSwitched = true;
+
+            if (createClaudeBridge || hasManagedClaudeBridge)
+            {
+                var claudeBridgeIndex = bridges.FindIndex(bridge =>
+                    string.Equals(bridge.Target, "claude", StringComparison.OrdinalIgnoreCase));
+                if (claudeBridgeIndex < 0)
+                {
+                    bridges.Add(SkillBridgeManager.CreateClaudeBridge(context, reference.PackageName, activePath));
+                    bridgeCreated = true;
+                }
+                else if (!DirectoryLinkManager.Exists(bridges[claudeBridgeIndex].Path))
+                {
+                    bridges[claudeBridgeIndex] = SkillBridgeManager.CreateClaudeBridge(
+                        context,
+                        reference.PackageName,
+                        activePath);
+                    bridgeCreated = true;
+                }
+            }
+
+            var files = entries.Select(entry => entry.RelativePath).ToArray();
+            var fileHashes = entries.ToDictionary(
+                entry => entry.RelativePath,
+                entry => ComputeSha256Digest(entry.Content),
+                StringComparer.Ordinal);
+            var record = CreateSharedRecord(
+                reference,
+                selected.Version,
+                target,
+                context,
+                packagePath,
+                activePath,
+                files,
+                fileHashes,
+                grantedPermissions,
+                archiveHash,
+                previous,
+                bridges,
+                reusesUserInstall: false);
+
+            _registry.Upsert(record, previous);
+            if (updateLockFile && context.LockFilePath is not null)
+                SkillStoreLockFileManager.Upsert(context.LockFilePath, _server, record);
+            GitExcludeManager.AddManagedPaths(context, reference.PackageName, bridges.Count > 0);
+            var removed = previous?.Files.Except(files, StringComparer.Ordinal).ToArray() ?? [];
+            return new InstallResult(record, removed);
+        }
+        catch
+        {
+            if (bridgeCreated)
+                DirectoryLinkManager.Remove(claudeBridgePath, activePath);
+            if (activeSwitched)
+            {
+                if (oldActiveTarget is null)
+                    DirectoryLinkManager.Remove(activePath, packagePath);
+                else
+                    DirectoryLinkManager.Replace(activePath, oldActiveTarget, packagePath);
+            }
+            _registry.Restore(stateBefore);
+            RestoreLockFile(context.LockFilePath, lockFileBefore);
+            if (packageCreated)
+                TryDeleteDirectory(packagePath);
+            throw;
+        }
+        finally
+        {
+            TryDeleteDirectory(stagingRoot);
+        }
+    }
+
+    public Task<IReadOnlyList<string>> UninstallAsync(
+        string name,
+        string target,
+        bool force,
+        CancellationToken ct) =>
+        UninstallAsync(
+            name,
+            target,
+            force,
+            scope: "user",
+            installRoot: null,
+            workingDirectory: null,
+            updateLockFile: true,
+            ct: ct);
+
+    public Task<IReadOnlyList<string>> UninstallAsync(
+        string name,
+        string target,
+        bool force,
+        string scope = "user",
+        string? installRoot = null,
+        string? workingDirectory = null,
+        bool updateLockFile = true,
+        CancellationToken ct = default)
+    {
+        _ = ct;
+        var reference = SkillReference.Parse(name);
+        target = string.IsNullOrWhiteSpace(target) ? "all" : target.ToLowerInvariant();
+        var context = SkillStoreContext.Resolve(scope, installRoot, workingDirectory);
+        var record = _registry.Find(reference.Name, context);
+        if (record is null)
+        {
+            var legacy = target == "all"
+                ? _registry.FindAnyLegacy(reference.Name)
+                : _registry.FindLegacy(reference.Name, target);
+            if (legacy is not null)
+                return UninstallLegacy(legacy, force);
+            throw new InvalidOperationException($"'{reference.Name}' is not installed for scope '{context.Scope}'.");
+        }
+        if (installRoot is null && !record.ReusesUserInstall)
+            context = SkillStoreContext.FromRecord(record);
+
+        using var operationLock = SkillStoreOperationLock.Acquire(context.OperationLockPath);
+        var stateBefore = _registry.Load();
+        var lockFileBefore = context.LockFilePath is not null && File.Exists(context.LockFilePath)
+            ? File.ReadAllText(context.LockFilePath)
+            : null;
+        if (context.Scope == "user")
+        {
+            var dependentProjects = stateBefore.Installations.Where(candidate =>
+                string.Equals(candidate.Layout, "shared", StringComparison.Ordinal) &&
+                string.Equals(candidate.Scope, "project", StringComparison.Ordinal) &&
+                candidate.ReusesUserInstall &&
+                string.Equals(candidate.Name, record.Name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (dependentProjects.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"SCOPE_DEPENDENCY_CONFLICT: {dependentProjects.Count} project installation(s) reuse '{record.Name}'. Remove or sync those project lockfiles before uninstalling the user installation.");
+            }
+        }
+
+        if (record.ReusesUserInstall)
+        {
+            var removedReusedBridges = new List<SkillBridgeRecord>();
+            try
+            {
+                foreach (var bridge in record.Bridges)
+                {
+                    DirectoryLinkManager.Remove(bridge.Path, bridge.TargetPath);
+                    removedReusedBridges.Add(bridge);
+                }
+
+                _registry.Remove(record);
+                if (updateLockFile && context.LockFilePath is not null)
+                    SkillStoreLockFileManager.Remove(context.LockFilePath, reference.Name);
+                return Task.FromResult<IReadOnlyList<string>>([]);
+            }
+            catch
+            {
+                foreach (var bridge in removedReusedBridges)
+                {
+                    if (!DirectoryLinkManager.Exists(bridge.Path))
+                        DirectoryLinkManager.Create(bridge.Path, bridge.TargetPath);
+                }
+                _registry.Restore(stateBefore);
+                RestoreLockFile(context.LockFilePath, lockFileBefore);
+                throw;
+            }
+        }
+
+        EnsureManagedFilesUnmodified(record, force);
+        var removedBridges = new List<SkillBridgeRecord>();
+        var activeRemoved = false;
+
+        try
+        {
+            foreach (var bridge in record.Bridges)
+            {
+                DirectoryLinkManager.Remove(bridge.Path, bridge.TargetPath);
+                removedBridges.Add(bridge);
+            }
+
+            DirectoryLinkManager.Remove(record.ActivePath, record.StorePath);
+            activeRemoved = true;
+            _registry.Remove(record);
+            if (updateLockFile && context.LockFilePath is not null)
+                SkillStoreLockFileManager.Remove(context.LockFilePath, reference.Name);
+
+            var packageFamily = Path.Combine(context.PackagesRoot, record.PackageName);
+            if (!_registry.Load().Installations.Any(candidate =>
+                    !candidate.ReusesUserInstall &&
+                    IsPathWithin(candidate.StorePath, packageFamily)))
+            {
+                TryDeleteDirectory(packageFamily);
+            }
+
+            return Task.FromResult<IReadOnlyList<string>>(record.Files.ToArray());
+        }
+        catch
+        {
+            if (activeRemoved && Directory.Exists(record.StorePath))
+                DirectoryLinkManager.Create(record.ActivePath, record.StorePath);
+            foreach (var bridge in removedBridges)
+            {
+                if (!DirectoryLinkManager.Exists(bridge.Path))
+                    DirectoryLinkManager.Create(bridge.Path, bridge.TargetPath);
+            }
+            _registry.Restore(stateBefore);
+            RestoreLockFile(context.LockFilePath, lockFileBefore);
+            throw;
+        }
+    }
+
+    public async Task<InstallResult> UpdateAsync(
+        string name,
+        string target,
+        string? installRoot,
+        bool force,
+        bool allowNonStable = false,
+        bool acceptPermissionExpansion = false,
+        string scope = "user",
+        string? workingDirectory = null,
+        CancellationToken ct = default)
+    {
+        var reference = SkillReference.Parse(name);
+        var context = SkillStoreContext.Resolve(scope, installRoot, workingDirectory);
+        var current = _registry.Find(reference.Name, context);
+        if (current is null)
+        {
+            var legacy = target == "all"
+                ? _registry.FindAnyLegacy(reference.Name)
+                : _registry.FindLegacy(reference.Name, target);
+            if (legacy is null)
+                throw new InvalidOperationException($"'{reference.Name}' is not installed for scope '{context.Scope}'.");
+            return await UpdateLegacyAsync(legacy, force, allowNonStable, acceptPermissionExpansion, ct);
+        }
+        if (installRoot is null && !current.ReusesUserInstall)
+            context = SkillStoreContext.FromRecord(current);
+        var latest = await ResolveVersionAsync(
+            string.IsNullOrWhiteSpace(current.PackageName) ? reference.PackageName : current.PackageName,
+            null,
+            allowNonStable,
+            ct);
+
+        if (string.Equals(current.Version, latest.Version, StringComparison.OrdinalIgnoreCase))
+            return new InstallResult(current, []);
+
+        return await InstallAsync(
+            current.Name,
+            latest.Version,
+            target,
+            installRoot ?? context.AgentsRoot,
+            force,
+            allowNonStable,
+            acceptPermissionExpansion,
+            scope,
+            workingDirectory,
+            ct: ct);
+    }
+
+    public async Task<InstallResult> RollbackAsync(
+        string name,
+        string target,
+        string? version,
+        bool force,
+        bool allowNonStable = false,
+        bool acceptPermissionExpansion = false,
+        string scope = "user",
+        string? installRoot = null,
+        string? workingDirectory = null,
+        CancellationToken ct = default)
+    {
+        var reference = SkillReference.Parse(name, version);
+        var context = SkillStoreContext.Resolve(scope, installRoot, workingDirectory);
+        var current = _registry.Find(reference.Name, context);
+        var previous = _registry.GetRollback(reference.Name, context, reference.Version);
+        if (current is null && previous is null)
+        {
+            var legacy = target == "all"
+                ? _registry.FindAnyLegacy(reference.Name)
+                : _registry.FindLegacy(reference.Name, target);
+            if (legacy is not null)
+                return await RollbackLegacyAsync(legacy, reference.Version, force, allowNonStable, acceptPermissionExpansion, ct);
+        }
+        var contextRecord = current ?? previous;
+        if (installRoot is null && contextRecord is { ReusesUserInstall: false })
+            context = SkillStoreContext.FromRecord(contextRecord);
+        var rollbackVersion = reference.Version ?? previous?.Version
+                              ?? throw new InvalidOperationException(
+                                  $"No rollback record found for '{reference.Name}' on target '{target}'.");
+
+        var result = await InstallAsync(
+            reference.Name,
+            rollbackVersion,
+            target,
+            installRoot ?? context.AgentsRoot,
+            force,
+            allowNonStable || previous is not null,
+            acceptPermissionExpansion,
+            scope,
+            workingDirectory,
+            ct: ct);
+        if (previous is not null)
+            _registry.RemoveHistory(previous);
+        return result;
+    }
+
+    private async Task<InstallResult> InstallLegacyAsync(
+        SkillReference reference,
+        string? version,
+        string target,
+        string? installRoot,
+        bool force,
+        bool allowNonStable,
+        bool acceptPermissionExpansion,
+        CancellationToken ct)
+    {
+        var selected = await ResolveVersionAsync(reference.PackageName, version, allowNonStable, ct);
+        var root = ResolveLegacyInstallRoot(target, installRoot);
         var installPath = EnsureChildPath(root, reference.PackageName);
-        var previous = _registry.Find(reference.Name, target);
+        var previous = _registry.FindLegacy(reference.Name, target);
         var installReference = await _client.GetInstallReferenceAsync(reference.PackageName, selected.Version, ct)
                                ?? throw new InvalidOperationException(
                                    $"No governed install reference found for '{reference.PackageName}@{selected.Version}'.");
@@ -58,31 +575,11 @@ internal sealed class SkillInstaller
                 $"PERMISSION_CONFIRMATION_REQUIRED: {string.Join(", ", expandedPermissions)}. Re-run with --yes after reviewing the change.");
         }
 
-        if (previous is not null &&
-            !string.Equals(Path.GetFullPath(previous.InstallPath), installPath, PathComparison))
-        {
-            throw new InvalidOperationException(
-                $"'{reference.Name}' is already managed at '{previous.InstallPath}'. Uninstall it before changing install root.");
-        }
-
-        var conflicting = _registry.Load().Installations.FirstOrDefault(record =>
-            !string.Equals(record.Name, reference.Name, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(Path.GetFullPath(record.InstallPath), installPath, PathComparison));
-        if (conflicting is not null)
-        {
-            throw new InvalidOperationException(
-                $"Install path '{installPath}' is already managed by '{conflicting.Name}'.");
-        }
-
         var archiveBytes = await DownloadArchiveAsync(installReference, selected, ct);
         var archiveHash = ComputeSha256Digest(archiveBytes);
         var expectedHash = NormalizeDigest(installReference.Digest);
         if (!string.Equals(archiveHash, expectedHash, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException(
-                $"DIGEST_MISMATCH: expected {expectedHash}, downloaded {archiveHash}.");
-        }
-
+            throw new InvalidDataException($"DIGEST_MISMATCH: expected {expectedHash}, downloaded {archiveHash}.");
         var entries = ReadArchiveEntries(archiveBytes);
         if (previous is not null)
             EnsureManagedFilesUnmodified(previous, force);
@@ -95,28 +592,20 @@ internal sealed class SkillInstaller
         var backupPath = EnsureChildPath(backupRoot, reference.PackageName);
         var existingMoved = false;
         var installedMoved = false;
-
         try
         {
             Directory.CreateDirectory(stagedInstallPath);
             CopyUnmanagedFiles(installPath, stagedInstallPath, previous, entries, force);
             await WriteEntriesAsync(stagedInstallPath, entries, ct);
-
             if (Directory.Exists(installPath))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
                 Directory.Move(installPath, backupPath);
                 existingMoved = true;
             }
-            else if (File.Exists(installPath))
-            {
-                throw new IOException($"Install path is a file: {installPath}");
-            }
-
             Directory.CreateDirectory(Path.GetDirectoryName(installPath)!);
             Directory.Move(stagedInstallPath, installPath);
             installedMoved = true;
-
             var files = entries.Select(entry => entry.RelativePath).ToArray();
             var fileHashes = entries.ToDictionary(
                 entry => entry.RelativePath,
@@ -129,19 +618,19 @@ internal sealed class SkillInstaller
                 Version = selected.Version,
                 Target = target,
                 InstallPath = installPath,
+                ActivePath = installPath,
                 Files = files,
                 FileHashes = fileHashes,
                 GrantedPermissions = grantedPermissions,
                 ArchiveHash = archiveHash,
                 Server = _server,
                 PreviousVersion = previous?.Version,
-                InstalledAt = DateTimeOffset.UtcNow
+                InstalledAt = DateTimeOffset.UtcNow,
+                Layout = "legacy-direct"
             };
-
             _registry.Upsert(record, previous);
-            var removed = previous?.Files.Except(files, StringComparer.Ordinal).ToArray() ?? [];
             TryDeleteDirectory(backupRoot);
-            return new InstallResult(record, removed);
+            return new InstallResult(record, previous?.Files.Except(files, StringComparer.Ordinal).ToArray() ?? []);
         }
         catch
         {
@@ -158,127 +647,54 @@ internal sealed class SkillInstaller
         }
     }
 
-    public Task<IReadOnlyList<string>> UninstallAsync(
-        string name,
-        string target,
-        bool force,
-        CancellationToken ct = default)
+    private Task<IReadOnlyList<string>> UninstallLegacy(SkillInstallRecord record, bool force)
     {
-        _ = ct;
-        var reference = SkillReference.Parse(name);
-        var record = _registry.Find(reference.Name, target)
-                     ?? throw new InvalidOperationException(
-                         $"'{reference.Name}' is not installed for target '{target}'.");
-
         EnsureManagedFilesUnmodified(record, force);
         var installPath = Path.GetFullPath(record.InstallPath);
-        var root = Path.GetDirectoryName(installPath)
-                   ?? throw new IOException($"Invalid install path: {installPath}");
-        var operationId = Guid.NewGuid().ToString("N");
-        var stagingRoot = EnsureChildPath(root, Path.Combine(".agent-skill-store-staging", operationId));
-        var stagedInstallPath = EnsureChildPath(stagingRoot, Path.GetFileName(installPath));
-        var backupRoot = EnsureChildPath(root, Path.Combine(".agent-skill-store-backup", operationId));
-        var backupPath = EnsureChildPath(backupRoot, Path.GetFileName(installPath));
-        var existingMoved = false;
-        var stagedMoved = false;
-
-        try
-        {
-            Directory.CreateDirectory(stagedInstallPath);
-            CopyUnmanagedFiles(installPath, stagedInstallPath, record, [], force: false);
-
-            if (Directory.Exists(installPath))
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-                Directory.Move(installPath, backupPath);
-                existingMoved = true;
-            }
-
-            if (Directory.Exists(stagedInstallPath) &&
-                Directory.EnumerateFileSystemEntries(stagedInstallPath).Any())
-            {
-                Directory.Move(stagedInstallPath, installPath);
-                stagedMoved = true;
-            }
-
-            _registry.Remove(record);
-            TryDeleteDirectory(backupRoot);
-            return Task.FromResult<IReadOnlyList<string>>(record.Files.ToArray());
-        }
-        catch
-        {
-            if (stagedMoved && Directory.Exists(installPath))
-                Directory.Delete(installPath, true);
-            if (existingMoved && Directory.Exists(backupPath))
-                Directory.Move(backupPath, installPath);
-            throw;
-        }
-        finally
-        {
-            TryDeleteDirectory(stagingRoot);
-            TryDeleteDirectory(backupRoot);
-        }
+        if (Directory.Exists(installPath))
+            Directory.Delete(installPath, true);
+        _registry.Remove(record);
+        return Task.FromResult<IReadOnlyList<string>>(record.Files.ToArray());
     }
 
-    public async Task<InstallResult> UpdateAsync(
-        string name,
-        string target,
-        string? installRoot,
+    private async Task<InstallResult> UpdateLegacyAsync(
+        SkillInstallRecord current,
         bool force,
-        bool allowNonStable = false,
-        bool acceptPermissionExpansion = false,
-        CancellationToken ct = default)
+        bool allowNonStable,
+        bool acceptPermissionExpansion,
+        CancellationToken ct)
     {
-        var reference = SkillReference.Parse(name);
-        var current = _registry.Find(reference.Name, target)
-                      ?? throw new InvalidOperationException(
-                          $"'{reference.Name}' is not installed for target '{target}'.");
-        var latest = await ResolveVersionAsync(
-            string.IsNullOrWhiteSpace(current.PackageName) ? reference.PackageName : current.PackageName,
-            null,
-            allowNonStable,
-            ct);
-
+        var latest = await ResolveVersionAsync(current.PackageName, null, allowNonStable, ct);
         if (string.Equals(current.Version, latest.Version, StringComparison.OrdinalIgnoreCase))
             return new InstallResult(current, []);
-
-        return await InstallAsync(
-            current.Name,
+        return await InstallLegacyAsync(
+            SkillReference.Parse(current.Name),
             latest.Version,
-            target,
-            installRoot ?? Path.GetDirectoryName(current.InstallPath),
+            current.Target,
+            Path.GetDirectoryName(current.InstallPath),
             force,
             allowNonStable,
             acceptPermissionExpansion,
             ct);
     }
 
-    public async Task<InstallResult> RollbackAsync(
-        string name,
-        string target,
+    private async Task<InstallResult> RollbackLegacyAsync(
+        SkillInstallRecord current,
         string? version,
         bool force,
-        bool allowNonStable = false,
-        bool acceptPermissionExpansion = false,
-        CancellationToken ct = default)
+        bool allowNonStable,
+        bool acceptPermissionExpansion,
+        CancellationToken ct)
     {
-        var reference = SkillReference.Parse(name, version);
-        var current = _registry.Find(reference.Name, target);
-        var previous = _registry.GetRollback(reference.Name, target, reference.Version);
-        var rollbackVersion = reference.Version ?? previous?.Version
+        var previous = _registry.GetRollback(current.Name, current.Target, version);
+        var rollbackVersion = version ?? previous?.Version
                               ?? throw new InvalidOperationException(
-                                  $"No rollback record found for '{reference.Name}' on target '{target}'.");
-        var installRoot = current is not null
-            ? Path.GetDirectoryName(current.InstallPath)
-            : previous is not null
-                ? Path.GetDirectoryName(previous.InstallPath)
-                : null;
-
-        var result = await InstallAsync(
-            reference.Name,
+                                  $"No rollback record found for '{current.Name}' on target '{current.Target}'.");
+        var result = await InstallLegacyAsync(
+            SkillReference.Parse(current.Name),
             rollbackVersion,
-            target,
-            installRoot,
+            current.Target,
+            Path.GetDirectoryName(current.InstallPath),
             force,
             allowNonStable || previous is not null,
             acceptPermissionExpansion,
@@ -288,19 +704,120 @@ internal sealed class SkillInstaller
         return result;
     }
 
-    public static string ResolveInstallRoot(string target, string? explicitRoot)
+    private static string ResolveLegacyInstallRoot(string target, string? explicitRoot)
     {
         if (!string.IsNullOrWhiteSpace(explicitRoot))
             return Path.GetFullPath(explicitRoot);
-
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return target.ToLowerInvariant() switch
         {
             "codex" => Path.Combine(profile, ".codex", "skills"),
             "claude" => Path.Combine(profile, ".claude", "skills"),
             "pi" => Path.Combine(profile, ".pi", "agent", "skills"),
-            _ => throw new ArgumentException("Target must be one of: codex, claude, pi.", nameof(target))
+            _ => throw new ArgumentException("Legacy target must be one of: codex, claude, pi.", nameof(target))
         };
+    }
+
+    private SkillInstallRecord CreateSharedRecord(
+        SkillReference reference,
+        string version,
+        string target,
+        SkillStoreContext context,
+        string storePath,
+        string activePath,
+        IReadOnlyList<string> files,
+        Dictionary<string, string> fileHashes,
+        IReadOnlyList<string> grantedPermissions,
+        string archiveHash,
+        SkillInstallRecord? previous,
+        IReadOnlyList<SkillBridgeRecord> bridges,
+        bool reusesUserInstall) => new()
+        {
+            Name = reference.Name,
+            PackageName = reference.PackageName,
+            Version = version,
+            Target = target,
+            InstallPath = activePath,
+            Files = files,
+            FileHashes = fileHashes,
+            GrantedPermissions = grantedPermissions,
+            ArchiveHash = archiveHash,
+            Server = _server,
+            PreviousVersion = previous?.Version,
+            InstalledAt = DateTimeOffset.UtcNow,
+            Layout = "shared",
+            Scope = context.Scope,
+            ProjectRoot = context.ProjectRoot,
+            StorePath = storePath,
+            ActivePath = activePath,
+            Bridges = bridges,
+            ReusesUserInstall = reusesUserInstall
+        };
+
+    private static void PreflightManagedActivePath(SkillInstallRecord? previous, string activePath)
+    {
+        if (!DirectoryLinkManager.Exists(activePath))
+        {
+            if (previous is not null && !previous.ReusesUserInstall)
+                throw new IOException($"Managed Skill entry is missing: {activePath}");
+            return;
+        }
+
+        var target = DirectoryLinkManager.ResolveTarget(activePath);
+        if (target is null)
+            throw new IOException($"Refusing to overwrite unmanaged Skill directory: {activePath}");
+        if (previous is null || previous.ReusesUserInstall)
+            throw new IOException($"Refusing to adopt unmanaged Skill link: {activePath}");
+        if (!DirectoryLinkManager.PathsEqual(target, previous.StorePath))
+            throw new IOException($"Managed Skill entry points to an unexpected target: {activePath}");
+    }
+
+    private static void PreflightBridge(string bridgePath, string activePath)
+    {
+        if (!DirectoryLinkManager.Exists(bridgePath))
+            return;
+        var target = DirectoryLinkManager.ResolveTarget(bridgePath);
+        if (target is null)
+            throw new IOException($"Refusing to overwrite unmanaged Claude Skill directory: {bridgePath}");
+        if (!DirectoryLinkManager.PathsEqual(target, activePath))
+            throw new IOException($"Claude Skill bridge points to an unexpected target: {bridgePath}");
+    }
+
+    private static void EnsurePackageMatches(
+        string packagePath,
+        IReadOnlyList<ArchiveEntryContent> entries)
+    {
+        var expectedFiles = entries.ToDictionary(
+            entry => entry.RelativePath,
+            entry => ComputeSha256Digest(entry.Content),
+            StringComparer.Ordinal);
+        var actualFiles = DirectoryLinkManager.EnumerateRegularFiles(packagePath)
+            .ToDictionary(
+                path => Path.GetRelativePath(packagePath, path).Replace('\\', '/'),
+                path => ComputeSha256Digest(File.ReadAllBytes(path)),
+                StringComparer.Ordinal);
+        if (expectedFiles.Count != actualFiles.Count ||
+            expectedFiles.Any(entry =>
+                !actualFiles.TryGetValue(entry.Key, out var actualHash) ||
+                !string.Equals(entry.Value, actualHash, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new IOException($"Immutable package directory has been modified: {packagePath}");
+        }
+    }
+
+    private static void RestoreLockFile(string? path, string? content)
+    {
+        if (path is null)
+            return;
+        if (content is null)
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
     }
 
     private async Task<SkillVersionSummary> ResolveVersionAsync(
@@ -573,6 +1090,15 @@ internal sealed class SkillInstaller
         }
 
         return child;
+    }
+
+    private static bool IsPathWithin(string path, string root)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+        var normalizedPath = Path.GetFullPath(path);
+        var normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        return normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, PathComparison);
     }
 
     private static string NormalizeDigest(string value) =>

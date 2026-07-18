@@ -36,6 +36,13 @@ if (parsedArgs.Command == "")
     return 1;
 }
 
+if (!string.IsNullOrWhiteSpace(parsedArgs.InstallRoot) &&
+    parsedArgs.Command is "install" or "uninstall" or "remove" or "update" or "rollback" or "sync" or "doctor" or "bridge")
+{
+    ConsoleOutput.WriteWarning(
+        "Compatibility notice: --install-root now overrides the .agents root instead of a client-specific skills directory.");
+}
+
 if (parsedArgs.Command == "config")
     return await ConfigCommand.ExecuteAsync(parsedArgs);
 
@@ -50,7 +57,8 @@ var isLocalInstallList = parsedArgs.Command == "list" &&
                          parsedArgs.Positional.Count > 0 &&
                          string.Equals(parsedArgs.Positional[0], "installed", StringComparison.OrdinalIgnoreCase);
 var isOfflineApiKeyGenerate = parsedArgs.Command == "api-key" && parsedArgs.SubCommand == "generate";
-var isLocalOnly = parsedArgs.Command is "uninstall" or "remove" || isLocalInstallList || isOfflineApiKeyGenerate;
+var isLocalMaintenance = parsedArgs.Command is "uninstall" or "remove" or "doctor" or "bridge" or "migrate";
+var isLocalOnly = isLocalMaintenance || isLocalInstallList || isOfflineApiKeyGenerate;
 if (isLocalOnly)
 {
     using var localClient = new AgentSkillStoreClient("http://placeholder");
@@ -115,6 +123,10 @@ static async Task<int> DispatchAsync(ParsedArgs parsedArgs, AgentSkillStoreClien
         "list-subagents" => await ListSubAgentsCommand.ExecuteAsync(parsedArgs, client),
         "versions" => await VersionsCommand.ExecuteAsync(parsedArgs, client),
         "verify" => await VerifyCommand.ExecuteAsync(parsedArgs, client),
+        "sync" => await SyncCommand.ExecuteAsync(parsedArgs, client, server),
+        "doctor" => DoctorCommand.Execute(parsedArgs),
+        "bridge" => BridgeCommand.Execute(parsedArgs),
+        "migrate" => await MigrateCommand.ExecuteAsync(parsedArgs, client, server),
         "api-key" => await ApiKeyCommand.ExecuteAsync(parsedArgs, client),
         _ => UnknownCommand(parsedArgs.Command)
     };
@@ -171,6 +183,10 @@ static void PrintHelp()
     Console.WriteLine("  list-subagents            List sub-agents on the server");
     Console.WriteLine("  versions <name>           List all versions of a skill");
     Console.WriteLine("  verify <path>             Verify local skill matches published version");
+    Console.WriteLine("  sync                      Reconcile managed Skills and project lockfile");
+    Console.WriteLine("  doctor                    Diagnose links, digests, conflicts, and legacy installs");
+    Console.WriteLine("  bridge                    Manage non-native Agent bridges");
+    Console.WriteLine("  migrate                   Inspect or migrate legacy direct installations");
     Console.WriteLine("  config                    Manage CLI configuration");
     Console.WriteLine("  login                     Save the server URL and API key");
     Console.WriteLine("  api-key                   Generate or manage API keys");
@@ -179,8 +195,9 @@ static void PrintHelp()
     Console.WriteLine("  --server-url <url>        AgentSkillStore URL (overrides config/env)");
     Console.WriteLine("  --api-key <key>           API key (overrides config/env)");
     Console.WriteLine("  --output <text|json>      Output format (default: text)");
-    Console.WriteLine("  --target <codex|claude|pi> Install target for install commands");
-    Console.WriteLine("  --install-root <path>     Override target install root");
+    Console.WriteLine("  --target <all|codex|claude|pi|opencode|agents> Bridge target");
+    Console.WriteLine("  --scope <user|project>    Installation scope");
+    Console.WriteLine("  --install-root <path>     Override the .agents root");
     Console.WriteLine("  --allow-non-stable       Allow an explicit beta/deprecated version");
     Console.WriteLine("  --yes, -y                Confirm destructive actions or permission expansion");
     Console.WriteLine("  --verbose, -v             Enable verbose output");

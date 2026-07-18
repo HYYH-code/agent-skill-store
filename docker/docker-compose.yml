@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: agent-skill-store:0.1.0
+    image: agent-skill-store:0.2.0
     container_name: agent-skill-store
     ports:
       - "8081:8080"

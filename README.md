@@ -74,7 +74,7 @@ Install the local project as a .NET tool package after packing it:
 
 ```bash
 dotnet pack src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj -c Release -o artifacts/nuget
-dotnet tool install --global --add-source artifacts/nuget AgentSkillStore.Cli --version 0.1.0
+dotnet tool install --global --add-source artifacts/nuget AgentSkillStore.Cli --version 0.2.0
 ```
 
 Configure a server and an Agent Key:
@@ -82,7 +82,8 @@ Configure a server and an Agent Key:
 ```bash
 skillstore login --server http://localhost:8081 --api-key '<key>'
 skillstore list
-skillstore install engineering/code-review-checklist@2.1.0 --target codex
+skillstore install engineering/code-review-checklist@2.1.0
+skillstore doctor
 ```
 
 The CLI reads:
@@ -175,7 +176,7 @@ See [docs/TOOLING.md](docs/TOOLING.md) for packaging, E2E, and container checks.
 
 ## Release Status
 
-`v0.1.0` produces local release artifacts for four CLI platforms, NuGet packages, OCI container archives, and `SHA256SUMS`. The first release does not publish to NuGet.org or GHCR automatically.
+`v0.2.0` produces local release artifacts for four CLI platforms, NuGet packages, OCI container archives, and `SHA256SUMS`. The release does not publish to NuGet.org or GHCR automatically.
 
 ## License
 

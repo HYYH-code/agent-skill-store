@@ -20,13 +20,68 @@ internal sealed record SkillInstallRecord
     public string Server { get; init; } = "";
     public DateTimeOffset InstalledAt { get; init; } = DateTimeOffset.UtcNow;
     public string? PreviousVersion { get; init; }
+    public string Layout { get; init; } = "legacy-direct";
+    public string Scope { get; init; } = "user";
+    public string? ProjectRoot { get; init; }
+    public string StorePath { get; init; } = "";
+    public string ActivePath { get; init; } = "";
+    public IReadOnlyList<SkillBridgeRecord> Bridges { get; init; } = [];
+    public bool ReusesUserInstall { get; init; }
 }
 
 internal sealed record SkillInstallState
 {
-    public int SchemaVersion { get; init; } = 1;
+    public int SchemaVersion { get; init; } = 2;
     public List<SkillInstallRecord> Installations { get; init; } = [];
     public List<SkillInstallRecord> History { get; init; } = [];
+}
+
+internal sealed record SkillBridgeRecord
+{
+    public string Target { get; init; } = "";
+    public string Path { get; init; } = "";
+    public string LinkKind { get; init; } = "";
+    public string TargetPath { get; init; } = "";
+}
+
+internal sealed record SkillBridgeSummary
+{
+    public string Name { get; init; } = "";
+    public string Target { get; init; } = "";
+    public string Path { get; init; } = "";
+    public string LinkKind { get; init; } = "";
+    public string TargetPath { get; init; } = "";
+}
+
+internal sealed record SkillStoreLockFile
+{
+    public int SchemaVersion { get; init; } = 1;
+    public string Server { get; init; } = "";
+    public List<SkillStoreLockEntry> Skills { get; init; } = [];
+}
+
+internal sealed record SkillStoreLockEntry
+{
+    public string Name { get; init; } = "";
+    public string Version { get; init; } = "";
+    public string Digest { get; init; } = "";
+    public IReadOnlyList<string> GrantedPermissions { get; init; } = [];
+}
+
+internal sealed record SkillDoctorFinding
+{
+    public string Severity { get; init; } = "info";
+    public string Code { get; init; } = "";
+    public string Skill { get; init; } = "";
+    public string Message { get; init; } = "";
+}
+
+internal sealed record SkillMigrationItem
+{
+    public string Name { get; init; } = "";
+    public string SourcePath { get; init; } = "";
+    public string Classification { get; init; } = "";
+    public string Message { get; init; } = "";
 }
 
 internal sealed record InstallResult(SkillInstallRecord Record, IReadOnlyList<string> RemovedFiles);

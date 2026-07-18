@@ -70,7 +70,7 @@ dotnet publish src/AgentSkillStore.Cli/AgentSkillStore.Cli.csproj -c Release -r 
 ## Container
 
 ```bash
-docker build -f docker/Dockerfile -t agent-skill-store:0.1.0 .
+docker build -f docker/Dockerfile -t agent-skill-store:0.2.0 .
 docker compose -f docker/docker-compose.yml config
 ```
 

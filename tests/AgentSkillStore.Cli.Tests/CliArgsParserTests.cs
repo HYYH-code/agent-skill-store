@@ -340,6 +340,7 @@ public sealed class CliArgsParserTests
         var result = CliArgsParser.Parse([
             "install", "my-skill", "1.2.3",
             "--target", "claude",
+            "--scope", "project",
             "--install-root", "./skills",
             "--output", "json"
         ]);
@@ -348,6 +349,7 @@ public sealed class CliArgsParserTests
         Assert.Equal("my-skill", result.Positional[0]);
         Assert.Equal("1.2.3", result.Positional[1]);
         Assert.Equal("claude", result.Target);
+        Assert.Equal("project", result.Scope);
         Assert.Equal("./skills", result.InstallRoot);
         Assert.Equal("json", result.OutputFormat);
     }
@@ -368,5 +370,28 @@ public sealed class CliArgsParserTests
         Assert.Equal("sk-test", result.ApiKey);
         Assert.Equal("pi", result.Target);
         Assert.True(result.AllowNonStable);
+    }
+
+    [Fact]
+    public void Parse_BridgeSubcommand()
+    {
+        var result = CliArgsParser.Parse([
+            "bridge", "add", "my-skill", "--target", "claude", "--scope", "project"
+        ]);
+
+        Assert.Equal("bridge", result.Command);
+        Assert.Equal("add", result.SubCommand);
+        Assert.Equal("my-skill", Assert.Single(result.Positional));
+        Assert.Equal("claude", result.Target);
+        Assert.Equal("project", result.Scope);
+    }
+
+    [Fact]
+    public void Parse_MigrateApply()
+    {
+        var result = CliArgsParser.Parse(["migrate", "--apply"]);
+
+        Assert.Equal("migrate", result.Command);
+        Assert.True(result.Apply);
     }
 }
